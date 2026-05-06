@@ -1,44 +1,272 @@
-// Package tui implements the Bubbletea-based workspace UI.
+// Package tui implements the Bubbletea workspace UI.
 package tui
 
 import (
+	"context"
 	"fmt"
+	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/calebcorpening/swarm/internal/agent"
+	"github.com/calebcorpening/swarm/internal/session"
+	"github.com/calebcorpening/swarm/internal/worktree"
 )
 
-type Workspace struct {
-	width, height int
-	quitting      bool
+// Mode is the input-routing state of the workspace. Only one sub-component
+// receives keystrokes at a time.
+type Mode int
+
+const (
+	ModeIdle Mode = iota
+	ModeNewSession
+	ModePicker
+)
+
+// AgentFactory returns a fresh adapter per session. Injected so tests and
+// alternate agents (codex, aider) can swap in without touching the TUI.
+type AgentFactory func() agent.Agent
+
+// WorkspaceDeps is what cmd/swarm constructs and hands the TUI.
+type WorkspaceDeps struct {
+	Registry      *session.Registry
+	Git           worktree.Manager
+	DefaultRepo   string
+	AgentFactory  AgentFactory
+	PickerStartIn string // initial directory for the repo picker
 }
 
-func NewWorkspace() Workspace {
-	return Workspace{}
+type Workspace struct {
+	deps WorkspaceDeps
+
+	width, height int
+	mode          Mode
+
+	modal  NewSessionModal
+	picker RepoPicker
+
+	// outputs accumulates text per session. Keyed by session ID.
+	outputs map[string]*strings.Builder
+	focused string
+
+	toast      string
+	toastUntil time.Time
+	quitting   bool
+}
+
+func NewWorkspace(deps WorkspaceDeps) Workspace {
+	return Workspace{
+		deps:    deps,
+		outputs: make(map[string]*strings.Builder),
+	}
 }
 
 func (w Workspace) Init() tea.Cmd { return nil }
 
+// ----- internal messages emitted by the spawn pipeline -----
+
+type sessionSpawnedMsg struct{ ID string }
+type sessionEventMsg struct {
+	ID    string
+	Event agent.Event
+}
+type sessionDoneMsg struct{ ID string }
+type spawnErrorMsg struct{ Err string }
+
 func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if sz, ok := msg.(tea.WindowSizeMsg); ok {
+		w.width, w.height = sz.Width, sz.Height
+		var c1, c2 tea.Cmd
+		w.modal, c1 = w.modal.Update(sz)
+		w.picker, c2 = w.picker.Update(sz)
+		return w, tea.Batch(c1, c2)
+	}
+
 	switch m := msg.(type) {
-	case tea.WindowSizeMsg:
-		w.width, w.height = m.Width, m.Height
-	case tea.KeyMsg:
-		switch m.String() {
-		case "q", "ctrl+c":
-			w.quitting = true
-			return w, tea.Quit
+	case NewSessionSubmittedMsg:
+		w.mode = ModeIdle
+		return w, w.startSession(m.Repo, m.Prompt)
+	case NewSessionCanceledMsg:
+		w.mode = ModeIdle
+		return w, nil
+	case BrowseRequestedMsg:
+		start := w.deps.PickerStartIn
+		if start == "" {
+			start = filepath.Dir(w.modal.repo)
 		}
+		w.picker = NewRepoPicker(start)
+		w.mode = ModePicker
+		return w, w.picker.Init()
+	case PickerResultMsg:
+		w.modal.SetRepo(m.RepoRoot)
+		w.mode = ModeNewSession
+		return w, nil
+	case PickerCanceledMsg:
+		w.mode = ModeNewSession
+		return w, nil
+	case PickerErrorMsg:
+		w.setToast(m.Err)
+		w.mode = ModeNewSession
+		return w, nil
+	case sessionSpawnedMsg:
+		w.outputs[m.ID] = &strings.Builder{}
+		w.focused = m.ID
+		if h, ok := w.deps.Registry.Get(m.ID); ok {
+			return w, waitForEvent(m.ID, h.Agent.Output())
+		}
+		return w, nil
+	case sessionEventMsg:
+		w.applyEvent(m)
+		if h, ok := w.deps.Registry.Get(m.ID); ok {
+			return w, waitForEvent(m.ID, h.Agent.Output())
+		}
+		return w, nil
+	case sessionDoneMsg:
+		w.deps.Registry.SetStatus(m.ID, session.StatusComplete)
+		return w, nil
+	case spawnErrorMsg:
+		w.setToast(m.Err)
+		return w, nil
+	}
+
+	if key, ok := msg.(tea.KeyMsg); ok {
+		switch w.mode {
+		case ModeIdle:
+			return w.handleIdleKey(key)
+		case ModeNewSession:
+			var cmd tea.Cmd
+			w.modal, cmd = w.modal.Update(key)
+			return w, cmd
+		case ModePicker:
+			var cmd tea.Cmd
+			w.picker, cmd = w.picker.Update(key)
+			return w, cmd
+		}
+	}
+
+	return w, nil
+}
+
+func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch k.String() {
+	case "q", "ctrl+c":
+		w.quitting = true
+		return w, tea.Quit
+	case "n":
+		w.modal = NewSessionModalFor(w.deps.DefaultRepo)
+		w.mode = ModeNewSession
+		return w, w.modal.Init()
+	case "j", "down":
+		w.advanceFocus(+1)
+	case "k", "up":
+		w.advanceFocus(-1)
 	}
 	return w, nil
 }
+
+func (w *Workspace) advanceFocus(delta int) {
+	list := w.deps.Registry.List()
+	if len(list) == 0 {
+		return
+	}
+	idx := -1
+	for i, h := range list {
+		if h.Session.ID == w.focused {
+			idx = i
+			break
+		}
+	}
+	idx = (idx + delta + len(list)) % len(list)
+	w.focused = list[idx].Session.ID
+}
+
+func (w *Workspace) applyEvent(m sessionEventMsg) {
+	if buf, ok := w.outputs[m.ID]; ok {
+		switch m.Event.Kind {
+		case agent.EventOutput:
+			buf.WriteString(m.Event.Text)
+		case agent.EventError:
+			if m.Event.Err != nil {
+				buf.WriteString("\n[error] " + m.Event.Err.Error() + "\n")
+			}
+		}
+	}
+}
+
+func (w *Workspace) setToast(s string) {
+	w.toast = s
+	w.toastUntil = time.Now().Add(4 * time.Second)
+}
+
+// ----- spawn pipeline -----
+
+// startSession runs the heavy work (worktree create + agent spawn) off the UI
+// goroutine. The result is delivered as a Bubbletea message so all state
+// mutations stay single-threaded inside Update.
+func (w Workspace) startSession(repo, prompt string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		id := w.deps.Registry.NextID()
+		wt, err := w.deps.Git.Create(ctx, repo, "HEAD", id)
+		if err != nil {
+			return spawnErrorMsg{Err: "worktree: " + err.Error()}
+		}
+		a := w.deps.AgentFactory()
+		if err := a.Spawn(context.Background(), agent.SpawnOpts{Cwd: wt.Path, Prompt: prompt}); err != nil {
+			_ = w.deps.Git.Destroy(context.Background(), wt)
+			return spawnErrorMsg{Err: "spawn: " + err.Error()}
+		}
+		now := time.Now()
+		h := &session.Handle{
+			Session: &session.Session{
+				ID: id, RepoRoot: repo, BaseRef: "HEAD",
+				Worktree: wt.Path, AgentName: "claude-code",
+				Prompt: prompt, Status: session.StatusRunning,
+				CreatedAt: now, UpdatedAt: now,
+			},
+			Worktree: wt, Agent: a,
+		}
+		w.deps.Registry.Add(h)
+		return sessionSpawnedMsg{ID: id}
+	}
+}
+
+// waitForEvent reads one event from the agent's output channel and converts
+// it into a Bubbletea message. Update re-issues this Cmd after each event,
+// forming a single-threaded streaming pipeline.
+func waitForEvent(id string, ch <-chan agent.Event) tea.Cmd {
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			return sessionDoneMsg{ID: id}
+		}
+		return sessionEventMsg{ID: id, Event: ev}
+	}
+}
+
+// ----- view -----
 
 var (
 	border    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63"))
 	dim       = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	statusBar = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("237")).Padding(0, 1)
+	rowFocus  = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
+	rowDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+	repoTag   = lipgloss.NewStyle().Foreground(lipgloss.Color("147"))
+	toastBox  = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Padding(0, 1)
 )
+
+// ansiPattern is a coarse strip for SGR/CSI escape sequences so the agent's
+// raw TTY output renders without garbage. Cursor moves and clears are not
+// preserved — proper rendering will come with a vt10x integration later.
+var ansiPattern = regexp.MustCompile("\x1b\\[[0-9;?]*[a-zA-Z]")
+
+func stripANSI(s string) string { return ansiPattern.ReplaceAllString(s, "") }
 
 func (w Workspace) View() string {
 	if w.quitting {
@@ -48,18 +276,78 @@ func (w Workspace) View() string {
 		return "starting…"
 	}
 
-	sidebarW := 28
+	body := w.renderBody()
+	status := statusBar.Width(w.width).Render(w.renderStatus())
+	view := lipgloss.JoinVertical(lipgloss.Left, body, status)
+
+	switch w.mode {
+	case ModeNewSession:
+		return lipgloss.Place(w.width, w.height, lipgloss.Center, lipgloss.Center, w.modal.View())
+	case ModePicker:
+		return lipgloss.Place(w.width, w.height, lipgloss.Center, lipgloss.Center, w.picker.View())
+	}
+	return view
+}
+
+func (w Workspace) renderBody() string {
+	sidebarW := 30
 	mainW := w.width - sidebarW - 4
 	bodyH := w.height - 3
 
-	sidebar := border.Width(sidebarW).Height(bodyH).Render(
-		"Sessions\n" + dim.Render(strings.Repeat("─", sidebarW-2)) + "\n" + dim.Render("(no sessions)\npress n to spawn"),
-	)
-	main := border.Width(mainW).Height(bodyH).Render(
-		"Swarm v0.0.1-dev\n\n" + dim.Render("welcome. select or spawn a session to begin.\n\nq quit · n new · d diff · x kill"),
-	)
-	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main)
+	sidebar := border.Width(sidebarW).Height(bodyH).Render(w.renderSidebar(sidebarW))
+	main := border.Width(mainW).Height(bodyH).Render(w.renderMain(mainW, bodyH-2))
+	return lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main)
+}
 
-	status := statusBar.Width(w.width).Render(fmt.Sprintf("%d sessions · $0.00 · %dx%d", 0, w.width, w.height))
-	return lipgloss.JoinVertical(lipgloss.Left, body, status)
+func (w Workspace) renderSidebar(width int) string {
+	list := w.deps.Registry.List()
+	if len(list) == 0 {
+		return "Sessions\n" +
+			dim.Render(strings.Repeat("─", width-2)) + "\n" +
+			dim.Render("(no sessions)\npress n to spawn")
+	}
+	rows := []string{"Sessions", dim.Render(strings.Repeat("─", width-2))}
+	for _, h := range list {
+		row := fmt.Sprintf("%s %s", h.Session.ID, h.Session.Status)
+		if name := filepath.Base(h.Session.RepoRoot); name != "" {
+			row += " " + repoTag.Render("· "+name)
+		}
+		if h.Session.ID == w.focused {
+			rows = append(rows, rowFocus.Render("▎ "+row))
+		} else {
+			rows = append(rows, rowDim.Render("  "+row))
+		}
+	}
+	return strings.Join(rows, "\n")
+}
+
+func (w Workspace) renderMain(_, height int) string {
+	if w.focused == "" {
+		return "Swarm v0.0.1-dev\n\n" +
+			dim.Render("welcome. press n to spawn a session.\n\n"+
+				"q quit · n new · j/k navigate")
+	}
+	buf, ok := w.outputs[w.focused]
+	if !ok || buf.Len() == 0 {
+		return dim.Render("waiting for output…")
+	}
+	text := stripANSI(buf.String())
+	lines := strings.Split(text, "\n")
+	if len(lines) > height {
+		lines = lines[len(lines)-height:]
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (w Workspace) renderStatus() string {
+	parts := []string{fmt.Sprintf("%d sessions", w.deps.Registry.Len())}
+	if w.focused != "" {
+		parts = append(parts, "focus="+w.focused)
+	}
+	parts = append(parts, fmt.Sprintf("%dx%d", w.width, w.height))
+	left := strings.Join(parts, " · ")
+	if w.toast != "" && time.Now().Before(w.toastUntil) {
+		return left + "  " + toastBox.Render("⚠ "+w.toast)
+	}
+	return left
 }
