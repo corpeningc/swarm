@@ -37,9 +37,9 @@ type NewSessionModal struct {
 
 func NewSessionModalFor(repo string) NewSessionModal {
 	name := textinput.New()
-	name.Placeholder = "label this session (optional)"
+	name.Placeholder = "name (slug → worktree dir; existing names reattach)"
 	name.CharLimit = 40
-	name.Width = 50
+	name.Width = 60
 	name.Focus()
 
 	prompt := textinput.New()

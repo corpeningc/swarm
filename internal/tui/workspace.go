@@ -593,43 +593,83 @@ func (w *Workspace) setToast(s string) {
 
 // ----- spawn pipeline -----
 
-// startSession runs the heavy work (worktree create + agent spawn) off the UI
-// goroutine. The result is delivered as a Bubbletea message so all state
-// mutations stay single-threaded inside Update.
+// startSession runs the heavy work (worktree create-or-attach + agent
+// spawn) off the UI goroutine. The result is delivered as a Bubbletea
+// message so all state mutations stay single-threaded inside Update.
+//
+// Worktree dir name comes from the user-supplied label when set
+// (slugified for filesystem safety), else the auto-generated session ID.
+// If a worktree already exists at the resolved path we attach the new
+// session to it instead of creating fresh, unless another live session
+// already owns it.
 func (w Workspace) startSession(repo, prompt, name string) tea.Cmd {
+	// Refusal check happens here on the UI goroutine so we can read the
+	// registry safely.
+	dirName := worktreeDirName(name)
+	if dirName == "" {
+		// No name given: generate a fresh, unambiguous one.
+		dirName = w.deps.Registry.NextID()
+	} else {
+		for _, h := range w.deps.Registry.List() {
+			if h.Worktree != nil && filepath.Base(h.Worktree.Path) == dirName && h.Agent != nil {
+				err := fmt.Sprintf("worktree %q is already in use by session %s", dirName, h.Session.Label())
+				return func() tea.Msg { return spawnErrorMsg{Err: err} }
+			}
+		}
+	}
+
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		id := w.deps.Registry.NextID()
-		wt, err := w.deps.Git.Create(ctx, repo, "HEAD", id)
-		if err != nil {
-			return spawnErrorMsg{Err: "worktree: " + err.Error()}
+
+		// Decide create-vs-attach by checking whether the dir exists.
+		path := filepath.Join(worktree.SwarmWorktreesDir(repo), dirName)
+		var wt *worktree.Worktree
+		var err error
+		if _, statErr := os.Stat(path); statErr == nil {
+			// Reuse the existing worktree. Read its current HEAD as the
+			// effective base ref.
+			wt = &worktree.Worktree{
+				ID:       dirName,
+				Path:     path,
+				BaseRef:  "HEAD",
+				RepoRoot: repo,
+			}
+		} else {
+			wt, err = w.deps.Git.Create(ctx, repo, "HEAD", dirName)
+			if err != nil {
+				return spawnErrorMsg{Err: "worktree: " + err.Error()}
+			}
 		}
+
 		a := w.deps.AgentFactory()
-		// Per-session hooks dir lives next to worktrees under .swarm/.
-		// Already gitignored, gets cleaned on session removal or prune.
 		hooksDir := filepath.Join(repo, ".swarm", "hooks")
-		_ = os.MkdirAll(filepath.Join(hooksDir, id), 0755)
+		_ = os.MkdirAll(filepath.Join(hooksDir, dirName), 0755)
 		opts := agent.SpawnOpts{
 			Cwd:       wt.Path,
 			Prompt:    prompt,
-			SessionID: id,
+			SessionID: dirName,
 			HooksDir:  hooksDir,
 		}
 		if os.Getenv("SWARM_DUMP_PTY") != "" {
 			dumpDir := filepath.Join(config.Home(), "dumps")
 			if err := os.MkdirAll(dumpDir, 0755); err == nil {
-				opts.DumpPath = filepath.Join(dumpDir, id+".log")
+				opts.DumpPath = filepath.Join(dumpDir, dirName+".log")
 			}
 		}
 		if err := a.Spawn(context.Background(), opts); err != nil {
-			_ = w.deps.Git.Destroy(context.Background(), wt)
+			// Don't auto-destroy a reused worktree on spawn failure — it
+			// existed before we touched it. Only newly created worktrees
+			// (where dirName == NextID-style) get cleaned.
+			if strings.HasPrefix(dirName, "sess-") {
+				_ = w.deps.Git.Destroy(context.Background(), wt)
+			}
 			return spawnErrorMsg{Err: "spawn: " + err.Error()}
 		}
 		now := time.Now()
 		h := &session.Handle{
 			Session: &session.Session{
-				ID: id, Name: name, RepoRoot: repo, BaseRef: "HEAD",
+				ID: dirName, Name: name, RepoRoot: repo, BaseRef: "HEAD",
 				Worktree: wt.Path, AgentName: "claude-code",
 				Prompt: prompt, Status: session.StatusRunning,
 				CreatedAt: now, UpdatedAt: now,
@@ -637,8 +677,33 @@ func (w Workspace) startSession(repo, prompt, name string) tea.Cmd {
 			Worktree: wt, Agent: a,
 		}
 		w.deps.Registry.Add(h)
-		return sessionSpawnedMsg{ID: id}
+		return sessionSpawnedMsg{ID: dirName}
 	}
+}
+
+// worktreeDirName slugifies a user-supplied label into a filesystem-safe
+// directory name. Returns empty if the result would be empty (caller
+// generates an auto ID instead).
+func worktreeDirName(label string) string {
+	label = strings.TrimSpace(strings.ToLower(label))
+	if label == "" {
+		return ""
+	}
+	var b strings.Builder
+	prevDash := false
+	for _, r := range label {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			prevDash = false
+		case r == '-' || r == '_' || r == ' ' || r == '/':
+			if !prevDash && b.Len() > 0 {
+				b.WriteByte('-')
+				prevDash = true
+			}
+		}
+	}
+	return strings.TrimRight(b.String(), "-")
 }
 
 // refreshDiff runs `git -C <worktree> diff <baseRef>...HEAD --color=always`
