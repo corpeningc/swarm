@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -35,6 +36,16 @@ const (
 	ModeConfirm
 )
 
+// ViewMode picks what the main pane renders for the focused session —
+// the live virtual terminal output, or a snapshot of the worktree's
+// git diff against its base ref.
+type ViewMode int
+
+const (
+	ViewLive ViewMode = iota
+	ViewDiff
+)
+
 // AgentFactory returns a fresh adapter per session. Injected so tests and
 // alternate agents (codex, aider) can swap in without touching the TUI.
 type AgentFactory func() agent.Agent
@@ -62,6 +73,16 @@ type Workspace struct {
 	terminals map[string]*SessionTerminal
 	focused   string
 
+	// viewMode picks what the main pane shows for the focused session.
+	viewMode ViewMode
+	// diffCache holds the most-recently-fetched git diff per session,
+	// keyed by session ID. Refreshed on D-toggle or 'r'.
+	diffCache map[string]string
+
+	// lastActivity is the wall-clock time of the most recent agent event
+	// for each session, used to flip running ↔ awaiting-input.
+	lastActivity map[string]time.Time
+
 	toast      string
 	toastUntil time.Time
 
@@ -75,12 +96,32 @@ type Workspace struct {
 
 func NewWorkspace(deps WorkspaceDeps) Workspace {
 	return Workspace{
-		deps:      deps,
-		terminals: make(map[string]*SessionTerminal),
+		deps:         deps,
+		terminals:    make(map[string]*SessionTerminal),
+		diffCache:    make(map[string]string),
+		lastActivity: make(map[string]time.Time),
 	}
 }
 
-func (w Workspace) Init() tea.Cmd { return nil }
+// activityTickInterval is how often we poll for "session idle long enough
+// to flip to awaiting-input".
+const activityTickInterval = 1 * time.Second
+
+// awaitingInputThreshold is how long a running session must be silent
+// before we treat it as waiting on the user.
+const awaitingInputThreshold = 3 * time.Second
+
+// activityTickMsg fires on the activityTickInterval to re-evaluate every
+// running session's running ↔ awaiting-input flag.
+type activityTickMsg struct{}
+
+func tickActivity() tea.Cmd {
+	return tea.Tick(activityTickInterval, func(time.Time) tea.Msg {
+		return activityTickMsg{}
+	})
+}
+
+func (w Workspace) Init() tea.Cmd { return tickActivity() }
 
 // ----- internal messages emitted by the spawn pipeline -----
 
@@ -99,6 +140,13 @@ type sessionStatusMsg struct{ ID string }
 // sessionRemovedMsg signals that a session is gone — discarded or
 // accepted. Workspace cleans up its terminal map and focus.
 type sessionRemovedMsg struct{ ID string }
+
+// diffRefreshedMsg carries fresh `git diff` output for a session.
+type diffRefreshedMsg struct {
+	ID   string
+	Diff string
+	Err  string
+}
 
 func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if sz, ok := msg.(tea.WindowSizeMsg); ok {
@@ -145,6 +193,7 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionSpawnedMsg:
 		cols, rows := w.mainPaneSize()
 		w.terminals[m.ID] = NewSessionTerminal(cols, rows)
+		w.lastActivity[m.ID] = time.Now()
 		w.focused = m.ID
 		if h, ok := w.deps.Registry.Get(m.ID); ok {
 			_ = h.Agent.Resize(cols, rows)
@@ -153,10 +202,19 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return w, nil
 	case sessionEventMsg:
 		w.applyEvent(m)
+		w.lastActivity[m.ID] = time.Now()
+		// Activity always means running. If we'd flipped to
+		// awaiting-input during a quiet stretch, flip back.
 		if h, ok := w.deps.Registry.Get(m.ID); ok {
+			if h.Session.Status == session.StatusAwaitingInput {
+				w.deps.Registry.SetStatus(m.ID, session.StatusRunning)
+			}
 			return w, waitForEvent(m.ID, h.Agent.Output())
 		}
 		return w, nil
+	case activityTickMsg:
+		w.evaluateAwaitingInput()
+		return w, tickActivity()
 	case sessionDoneMsg:
 		w.deps.Registry.SetStatus(m.ID, session.StatusComplete)
 		// If we were attached to the session that just exited, drop back
@@ -174,6 +232,7 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return w, nil
 	case sessionRemovedMsg:
 		delete(w.terminals, m.ID)
+		delete(w.diffCache, m.ID)
 		if w.focused == m.ID {
 			// Pick another session if any remain.
 			list := w.deps.Registry.List()
@@ -182,6 +241,13 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				w.focused = ""
 			}
+		}
+		return w, nil
+	case diffRefreshedMsg:
+		if m.Err != "" {
+			w.setToast(m.Err)
+		} else {
+			w.diffCache[m.ID] = m.Diff
 		}
 		return w, nil
 	}
@@ -269,6 +335,22 @@ func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			w.confirmPrompt = "accept " + id + "? merge into current branch"
 			w.pendingAction = func() tea.Cmd { return w.acceptSession(h) }
 			w.mode = ModeConfirm
+		}
+	case "D", "shift+d":
+		// Toggle the main pane between live agent output and the
+		// session's git diff vs its base ref.
+		if w.viewMode == ViewDiff {
+			w.viewMode = ViewLive
+		} else if h, ok := w.focusedHandle(); ok {
+			w.viewMode = ViewDiff
+			return w, w.refreshDiff(h)
+		}
+	case "r":
+		// Refresh the cached diff for the focused session.
+		if w.viewMode == ViewDiff {
+			if h, ok := w.focusedHandle(); ok {
+				return w, w.refreshDiff(h)
+			}
 		}
 	}
 	return w, nil
@@ -369,6 +451,26 @@ func (w Workspace) mainPaneSize() (cols, rows int) {
 	return clampMin(mainW-2, 20), clampMin(bodyH-2, 5)
 }
 
+// evaluateAwaitingInput flips every Running session that's been silent
+// past awaitingInputThreshold to AwaitingInput. Sessions in any other
+// status (complete, killed, failed, interrupted, awaiting-input) are
+// left alone — their state isn't being maintained by the heuristic.
+func (w *Workspace) evaluateAwaitingInput() {
+	now := time.Now()
+	for _, h := range w.deps.Registry.List() {
+		if h.Session.Status != session.StatusRunning {
+			continue
+		}
+		last, ok := w.lastActivity[h.Session.ID]
+		if !ok {
+			continue
+		}
+		if now.Sub(last) >= awaitingInputThreshold {
+			w.deps.Registry.SetStatus(h.Session.ID, session.StatusAwaitingInput)
+		}
+	}
+}
+
 // resizeAllSessions resizes both the virtual terminal and the agent's PTY
 // for every active session whenever the window size changes.
 func (w *Workspace) resizeAllSessions() {
@@ -424,6 +526,37 @@ func (w Workspace) startSession(repo, prompt, name string) tea.Cmd {
 		}
 		w.deps.Registry.Add(h)
 		return sessionSpawnedMsg{ID: id}
+	}
+}
+
+// refreshDiff runs `git -C <worktree> diff <baseRef>...HEAD --color=always`
+// off the UI goroutine and reports the output back via diffRefreshedMsg.
+// Color codes flow through to the rendered pane (we forced TrueColor at
+// startup) so additions/deletions show in green/red.
+func (w Workspace) refreshDiff(h *session.Handle) tea.Cmd {
+	id := h.Session.ID
+	wt := h.Worktree
+	baseRef := h.Session.BaseRef
+	if baseRef == "" {
+		baseRef = "HEAD"
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		// Diff the worktree's working tree against the merge-base of
+		// HEAD and the original baseRef. For our spawn flow baseRef is
+		// "HEAD" of the main repo at create time, captured as a SHA in
+		// the worktree's reflog — comparing against it covers both
+		// committed and uncommitted changes the agent made.
+		args := []string{"-C", wt.Path, "diff", "--color=always", baseRef}
+		out, err := exec.CommandContext(ctx, "git", args...).CombinedOutput()
+		if err != nil {
+			return diffRefreshedMsg{ID: id, Err: "diff: " + strings.TrimSpace(string(out))}
+		}
+		if len(out) == 0 {
+			return diffRefreshedMsg{ID: id, Diff: "(no changes)"}
+		}
+		return diffRefreshedMsg{ID: id, Diff: string(out)}
 	}
 }
 
@@ -517,6 +650,8 @@ var (
 	rowFocus   = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
 	rowDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 	repoTag    = lipgloss.NewStyle().Foreground(lipgloss.Color("147"))
+	awaitTag   = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
+	runTag     = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
 	toastBox   = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Padding(0, 1)
 	attachTag  = lipgloss.NewStyle().Foreground(lipgloss.Color("16")).Background(lipgloss.Color("82")).Bold(true).Padding(0, 1)
 )
@@ -572,7 +707,20 @@ func (w Workspace) renderSidebar(width int) string {
 	}
 	rows := []string{"Sessions", dim.Render(strings.Repeat("─", width-2))}
 	for _, h := range list {
-		row := fmt.Sprintf("%s %s", h.Session.Label(), h.Session.Status)
+		// Status glyph + label gets prominence so the user can scan a
+		// long sidebar and spot what needs them.
+		var statusBit string
+		switch h.Session.Status {
+		case session.StatusAwaitingInput:
+			statusBit = awaitTag.Render("◆ awaiting")
+		case session.StatusRunning:
+			statusBit = runTag.Render("● running")
+		case session.StatusInterrupted:
+			statusBit = dim.Render("⊘ interrupted")
+		default:
+			statusBit = dim.Render("· " + h.Session.Status.String())
+		}
+		row := fmt.Sprintf("%s  %s", h.Session.Label(), statusBit)
 		if name := filepath.Base(h.Session.RepoRoot); name != "" {
 			row += " " + repoTag.Render("· "+name)
 		}
@@ -590,7 +738,10 @@ func (w Workspace) renderMain(_, height int) string {
 		return "Swarm v0.0.1-dev\n\n" +
 			dim.Render("welcome. press n to spawn a session.\n\n"+
 				"q quit · n new · j/k navigate · enter attach\n"+
-				"x kill · a accept · d discard")
+				"x kill · a accept · d discard · D diff")
+	}
+	if w.viewMode == ViewDiff {
+		return w.renderDiff(height)
 	}
 	term, ok := w.terminals[w.focused]
 	if !ok {
@@ -602,6 +753,26 @@ func (w Workspace) renderMain(_, height int) string {
 		lines = lines[len(lines)-height:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// renderDiff returns the cached `git diff` output for the focused session,
+// truncated to the visible height. The header reminds the user this is
+// a snapshot.
+func (w Workspace) renderDiff(height int) string {
+	header := dim.Render("DIFF · D back to live · r refresh") + "\n"
+	body, ok := w.diffCache[w.focused]
+	if !ok {
+		return header + dim.Render("loading diff…")
+	}
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	visible := height - 2
+	if visible < 1 {
+		visible = 1
+	}
+	if len(lines) > visible {
+		lines = lines[:visible]
+	}
+	return header + strings.Join(lines, "\n")
 }
 
 func (w Workspace) renderStatus() string {
