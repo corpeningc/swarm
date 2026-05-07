@@ -50,6 +50,11 @@ type Session struct {
 	Status    Status
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// ClaudeSessionID is captured from the agent's output (the
+	// "claude --resume <uuid>" line Claude prints) so we can reattach
+	// to the same conversation when the user spawns a new session into
+	// an existing worktree. Empty if not yet captured.
+	ClaudeSessionID string
 }
 
 // Label is the identifier shown to the user — the user-supplied name when

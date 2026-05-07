@@ -1,11 +1,16 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/calebcorpening/swarm/internal/worktree"
 )
 
 // Messages emitted by the new-session modal. Workspace.Update intercepts these
@@ -14,7 +19,7 @@ type (
 	NewSessionSubmittedMsg struct {
 		Repo   string
 		Prompt string
-		Name   string // optional user-supplied label
+		Name   string // user-supplied; slugified by the workspace before use
 	}
 	NewSessionCanceledMsg struct{}
 	BrowseRequestedMsg    struct{}
@@ -23,16 +28,23 @@ type (
 const (
 	fieldName   = 0
 	fieldPrompt = 1
+	fieldList   = 2
 )
 
 // NewSessionModal collects a repo path, optional label, and prompt before
-// spawning a session. Tab cycles between name and prompt fields.
+// spawning a session. Tab cycles between name, prompt, and the existing-
+// worktree list.
 type NewSessionModal struct {
 	repo     string
 	name     textinput.Model
 	prompt   textinput.Model
 	focusIdx int
 	width    int
+
+	// existingWorktrees lists the slug names of worktrees already on disk
+	// in the chosen repo. Refreshed when SetRepo is called.
+	existingWorktrees []string
+	listCursor        int
 }
 
 func NewSessionModalFor(repo string) NewSessionModal {
@@ -47,17 +59,39 @@ func NewSessionModalFor(repo string) NewSessionModal {
 	prompt.CharLimit = 0
 	prompt.Width = 60
 
-	return NewSessionModal{
+	m := NewSessionModal{
 		repo:     repo,
 		name:     name,
 		prompt:   prompt,
 		focusIdx: fieldName,
 	}
+	m.refreshWorktrees()
+	return m
 }
 
-// SetRepo updates the displayed repo path. Called by Workspace after the
-// directory picker resolves a new path.
-func (m *NewSessionModal) SetRepo(repo string) { m.repo = repo }
+// SetRepo updates the displayed repo path and rescans existing worktrees.
+func (m *NewSessionModal) SetRepo(repo string) {
+	m.repo = repo
+	m.refreshWorktrees()
+	m.listCursor = 0
+}
+
+func (m *NewSessionModal) refreshWorktrees() {
+	m.existingWorktrees = nil
+	if m.repo == "" {
+		return
+	}
+	entries, err := os.ReadDir(worktree.SwarmWorktreesDir(m.repo))
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			m.existingWorktrees = append(m.existingWorktrees, e.Name())
+		}
+	}
+	sort.Strings(m.existingWorktrees)
+}
 
 func (m NewSessionModal) Init() tea.Cmd { return textinput.Blink }
 
@@ -79,7 +113,27 @@ func (m NewSessionModal) Update(msg tea.Msg) (NewSessionModal, tea.Cmd) {
 		case "shift+tab":
 			m.cycleFocus(-1)
 			return m, nil
+		case "up":
+			if m.focusIdx == fieldList && len(m.existingWorktrees) > 0 {
+				m.listCursor = (m.listCursor - 1 + len(m.existingWorktrees)) % len(m.existingWorktrees)
+				return m, nil
+			}
+		case "down":
+			if m.focusIdx == fieldList && len(m.existingWorktrees) > 0 {
+				m.listCursor = (m.listCursor + 1) % len(m.existingWorktrees)
+				return m, nil
+			}
 		case "enter":
+			// Enter on the worktree list: copy the highlighted name into
+			// the name field and bounce focus to prompt so the user can
+			// type a follow-up turn.
+			if m.focusIdx == fieldList && len(m.existingWorktrees) > 0 {
+				m.name.SetValue(m.existingWorktrees[m.listCursor])
+				m.focusIdx = fieldPrompt
+				m.name.Blur()
+				m.prompt.Focus()
+				return m, nil
+			}
 			p := strings.TrimSpace(m.prompt.Value())
 			if p == "" {
 				// Empty prompt: nudge focus to prompt field if we're on
@@ -99,22 +153,33 @@ func (m NewSessionModal) Update(msg tea.Msg) (NewSessionModal, tea.Cmd) {
 		}
 	}
 	var cmd tea.Cmd
-	if m.focusIdx == fieldName {
+	switch m.focusIdx {
+	case fieldName:
 		m.name, cmd = m.name.Update(msg)
-	} else {
+	case fieldPrompt:
 		m.prompt, cmd = m.prompt.Update(msg)
 	}
 	return m, cmd
 }
 
 func (m *NewSessionModal) cycleFocus(delta int) {
-	m.focusIdx = (m.focusIdx + delta + 2) % 2
-	if m.focusIdx == fieldName {
+	// Skip the worktree list focus target when there's nothing to pick.
+	maxField := fieldPrompt
+	if len(m.existingWorktrees) > 0 {
+		maxField = fieldList
+	}
+	span := maxField + 1
+	m.focusIdx = (m.focusIdx + delta + span) % span
+	switch m.focusIdx {
+	case fieldName:
 		m.name.Focus()
 		m.prompt.Blur()
-	} else {
+	case fieldPrompt:
 		m.name.Blur()
 		m.prompt.Focus()
+	case fieldList:
+		m.name.Blur()
+		m.prompt.Blur()
 	}
 }
 
@@ -127,10 +192,13 @@ var (
 	modalLabel = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	modalPath  = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	modalHint  = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Italic(true)
+
+	listFocusRow = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
+	listDimRow   = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 )
 
 func (m NewSessionModal) View() string {
-	body := strings.Join([]string{
+	parts := []string{
 		modalTitle.Render("new session"),
 		"",
 		modalLabel.Render("repo  ") + modalPath.Render(m.repo),
@@ -138,11 +206,46 @@ func (m NewSessionModal) View() string {
 		"",
 		modalLabel.Render("name  "),
 		m.name.View(),
+	}
+
+	if len(m.existingWorktrees) > 0 {
+		parts = append(parts, "", modalLabel.Render("existing worktrees"))
+		// Cap the visible list so the modal doesn't balloon.
+		const maxVisible = 5
+		visible := m.existingWorktrees
+		startIdx := 0
+		if len(visible) > maxVisible {
+			// Window the list around the cursor.
+			startIdx = m.listCursor - maxVisible/2
+			if startIdx < 0 {
+				startIdx = 0
+			}
+			if startIdx > len(visible)-maxVisible {
+				startIdx = len(visible) - maxVisible
+			}
+			visible = visible[startIdx : startIdx+maxVisible]
+		}
+		for i, name := range visible {
+			row := name
+			actualIdx := startIdx + i
+			if m.focusIdx == fieldList && actualIdx == m.listCursor {
+				row = listFocusRow.Render("▎ " + row + "  ↩ pick")
+			} else {
+				row = listDimRow.Render("  " + row)
+			}
+			parts = append(parts, row)
+		}
+		if len(m.existingWorktrees) > maxVisible {
+			parts = append(parts, modalHint.Render(filepath.Join("…", "and more above/below")))
+		}
+	}
+
+	parts = append(parts,
 		"",
 		modalLabel.Render("prompt"),
 		m.prompt.View(),
 		"",
 		modalHint.Render("tab next field · enter submit · esc cancel"),
-	}, "\n")
-	return modalBorder.Render(body)
+	)
+	return modalBorder.Render(strings.Join(parts, "\n"))
 }

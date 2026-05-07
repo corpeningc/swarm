@@ -48,6 +48,11 @@ type SpawnOpts struct {
 	// into per-session agent config (e.g. Claude's .claude/settings.local
 	// .json) and into SWARM_HOOKS_DIR for the spawned process to inherit.
 	HooksDir string
+
+	// ResumeID, if non-empty, asks the agent to continue an existing
+	// conversation. For Claude Code this maps to `claude --resume <id>`.
+	// Captured by Workspace from prior session output.
+	ResumeID string
 }
 
 type Agent interface {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -515,11 +516,32 @@ func (w *Workspace) applyEvent(m sessionEventMsg) {
 	switch m.Event.Kind {
 	case agent.EventOutput:
 		term.Feed([]byte(m.Event.Text))
+		w.captureClaudeResume(m.ID, m.Event.Text)
 	case agent.EventError:
 		if m.Event.Err != nil {
 			term.Feed([]byte("\r\n[error] " + m.Event.Err.Error() + "\r\n"))
 		}
 	}
+}
+
+// claudeResumePattern matches the line Claude Code prints near session
+// end: "Resume this session with: claude --resume <uuid>". Captures the
+// uuid for replay on the next reattach into the same worktree.
+var claudeResumePattern = regexp.MustCompile(`claude --resume ([0-9a-f-]{8,})`)
+
+func (w *Workspace) captureClaudeResume(id, text string) {
+	h, ok := w.deps.Registry.Get(id)
+	if !ok || h.Session.ClaudeSessionID != "" {
+		return
+	}
+	match := claudeResumePattern.FindStringSubmatch(text)
+	if len(match) < 2 {
+		return
+	}
+	h.Session.ClaudeSessionID = match[1]
+	// Triggers persist via SetStatus' write path. We could add a more
+	// specific helper but reusing the existing one keeps the API small.
+	w.deps.Registry.SetStatus(id, h.Session.Status)
 }
 
 // mainPaneSize returns the interior dimensions of the main pane (the area
@@ -604,16 +626,27 @@ func (w *Workspace) setToast(s string) {
 // already owns it.
 func (w Workspace) startSession(repo, prompt, name string) tea.Cmd {
 	// Refusal check happens here on the UI goroutine so we can read the
-	// registry safely.
+	// registry safely. Same pass also picks up the ClaudeSessionID of any
+	// existing handle for this worktree so we can reattach to the same
+	// conversation rather than starting fresh.
 	dirName := worktreeDirName(name)
+	var resumeID string
 	if dirName == "" {
 		// No name given: generate a fresh, unambiguous one.
 		dirName = w.deps.Registry.NextID()
 	} else {
 		for _, h := range w.deps.Registry.List() {
-			if h.Worktree != nil && filepath.Base(h.Worktree.Path) == dirName && h.Agent != nil {
+			if h.Worktree == nil || filepath.Base(h.Worktree.Path) != dirName {
+				continue
+			}
+			if h.Agent != nil {
 				err := fmt.Sprintf("worktree %q is already in use by session %s", dirName, h.Session.Label())
 				return func() tea.Msg { return spawnErrorMsg{Err: err} }
+			}
+			// Restored / interrupted handle for the same worktree:
+			// inherit its captured Claude session id.
+			if h.Session.ClaudeSessionID != "" {
+				resumeID = h.Session.ClaudeSessionID
 			}
 		}
 	}
@@ -650,6 +683,7 @@ func (w Workspace) startSession(repo, prompt, name string) tea.Cmd {
 			Prompt:    prompt,
 			SessionID: dirName,
 			HooksDir:  hooksDir,
+			ResumeID:  resumeID,
 		}
 		if os.Getenv("SWARM_DUMP_PTY") != "" {
 			dumpDir := filepath.Join(config.Home(), "dumps")
@@ -673,6 +707,9 @@ func (w Workspace) startSession(repo, prompt, name string) tea.Cmd {
 				Worktree: wt.Path, AgentName: "claude-code",
 				Prompt: prompt, Status: session.StatusRunning,
 				CreatedAt: now, UpdatedAt: now,
+				// Carry the captured resume id forward so it's
+				// visible in state.json and persists across restarts.
+				ClaudeSessionID: resumeID,
 			},
 			Worktree: wt, Agent: a,
 		}

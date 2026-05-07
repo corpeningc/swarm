@@ -239,6 +239,9 @@ func buildArgs(opts agent.SpawnOpts) []string {
 	if opts.SkipPermissions {
 		args = append(args, "--dangerously-skip-permissions")
 	}
+	if opts.ResumeID != "" {
+		args = append(args, "--resume", opts.ResumeID)
+	}
 	args = append(args, opts.ExtraArgs...)
 	if opts.Prompt != "" {
 		args = append(args, opts.Prompt)
