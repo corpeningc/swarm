@@ -59,6 +59,31 @@ func TestSessionTerminal_TinySizeClamped(t *testing.T) {
 	}
 }
 
+// TestSessionTerminal_KittyKeyboardCSIIgnored exercises the bug discovered
+// in dumps from real Claude sessions: \e[<u is the Kitty keyboard "push
+// flags" sequence, but the underlying emulator's parser treats `<` as a
+// regular char, falls through to case 'u' (DECRC), and snaps the cursor
+// to the last saved position. The filter must strip these sequences so
+// they don't move the cursor.
+func TestSessionTerminal_KittyKeyboardCSIIgnored(t *testing.T) {
+	st := NewSessionTerminal(40, 5)
+	// Walk the cursor down to row 3 so we can detect a jump back to home.
+	st.Feed([]byte("hello\r\nworld\r\nthird\r\nfourth"))
+	// Sequence Claude actually emits: kitty push, kitty pop, modifyOtherKeys.
+	st.Feed([]byte("\x1b[<u\x1b[>1u\x1b[>4;2m"))
+	st.Feed([]byte("AFTER"))
+	got := st.Render()
+	// "AFTER" must land on the last row we wrote text to (row 3, "fourth"),
+	// not at the saved cursor position from emulator startup.
+	lines := strings.Split(got, "\n")
+	if len(lines) < 4 {
+		t.Fatalf("not enough lines rendered: %d", len(lines))
+	}
+	if !strings.Contains(lines[3], "fourthAFTER") {
+		t.Errorf("kitty CSI moved cursor; line 3 = %q (full = %q)", lines[3], got)
+	}
+}
+
 // TestSessionTerminal_AltScreenSurvivesSwap exercises the property that
 // motivated swapping emulators: enter alt screen, draw, exit alt screen,
 // the original main-screen content should be visible again. vt10x failed

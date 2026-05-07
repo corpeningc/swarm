@@ -3,10 +3,22 @@ package tui
 import (
 	"bytes"
 	"io"
+	"regexp"
 	"strings"
 
 	"github.com/micro-editor/terminal"
 )
+
+// privateCSIPattern matches CSI sequences with a private-parameter prefix of
+// `<`, `>`, or `=`. micro-editor/terminal only recognizes `?` as a private
+// marker; any sequence starting with one of the others falls through to the
+// final-byte switch with no args, so e.g. `\e[<u` (Kitty keyboard push) gets
+// dispatched as `case 'u'` → DECRC → cursor jumps to the saved position.
+//
+// Claude Code uses these for the Kitty keyboard protocol. Filtering them
+// out is correct as long as we don't implement those protocols ourselves —
+// the emulator can't honor the request anyway. Real fix is upstream.
+var privateCSIPattern = regexp.MustCompile("\x1b\\[[<>=][0-9;]*[a-zA-Z]")
 
 // SessionTerminal is the per-session virtual terminal. Bytes from the agent's
 // PTY get fed in via Feed; the screen state is read out via Render and shown
@@ -40,11 +52,13 @@ func NewSessionTerminal(cols, rows int) *SessionTerminal {
 
 // Feed parses bytes from the agent into the virtual terminal. Despite the
 // underlying API name, VT.Write doesn't write to a PTY — it parses input
-// into screen state.
+// into screen state. We strip private-marker CSI sequences (`<`, `>`, `=`)
+// before feeding because the emulator misdispatches them.
 func (t *SessionTerminal) Feed(b []byte) {
 	if len(b) == 0 {
 		return
 	}
+	b = privateCSIPattern.ReplaceAll(b, nil)
 	_, _ = t.vt.Write(b)
 }
 
