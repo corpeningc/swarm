@@ -105,7 +105,13 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		w.picker = NewRepoPicker(start)
 		w.mode = ModePicker
-		return w, w.picker.Init()
+		// Forward the cached size so the freshly-constructed filepicker
+		// has a non-zero Height. Without this it renders nothing.
+		var sizeCmd tea.Cmd
+		if w.width > 0 && w.height > 0 {
+			w.picker, sizeCmd = w.picker.Update(tea.WindowSizeMsg{Width: w.width, Height: w.height})
+		}
+		return w, tea.Batch(sizeCmd, w.picker.Init())
 	case PickerResultMsg:
 		w.modal.SetRepo(m.RepoRoot)
 		w.mode = ModeNewSession
@@ -174,7 +180,11 @@ func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "n":
 		w.modal = NewSessionModalFor(w.deps.DefaultRepo)
 		w.mode = ModeNewSession
-		return w, w.modal.Init()
+		var sizeCmd tea.Cmd
+		if w.width > 0 && w.height > 0 {
+			w.modal, sizeCmd = w.modal.Update(tea.WindowSizeMsg{Width: w.width, Height: w.height})
+		}
+		return w, tea.Batch(sizeCmd, w.modal.Init())
 	case "j", "down":
 		w.advanceFocus(+1)
 	case "k", "up":

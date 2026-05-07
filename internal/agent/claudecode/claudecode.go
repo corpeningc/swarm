@@ -197,12 +197,15 @@ func buildArgs(opts agent.SpawnOpts) []string {
 	return args
 }
 
-// mergeEnv overlays opts.Env on top of os.Environ.
+// mergeEnv overlays opts.Env on top of os.Environ, then pins TERM to a value
+// our virtual terminal can actually emulate. Bubbletea may have set TERM to
+// something exotic in the parent process; the agent should see plain
+// xterm-256color so it doesn't try alt-screen quirks the emulator misses.
 func mergeEnv(extra map[string]string) []string {
-	if len(extra) == 0 {
-		return os.Environ()
-	}
 	base := os.Environ()
+	if _, hasTerm := extra["TERM"]; !hasTerm {
+		base = append(base, "TERM=xterm-256color")
+	}
 	for k, v := range extra {
 		base = append(base, k+"="+v)
 	}
