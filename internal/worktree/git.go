@@ -51,6 +51,48 @@ func (g *GitManager) Create(ctx context.Context, repoRoot, baseRef, id string) (
 	return &Worktree{ID: id, Path: path, BaseRef: baseRef, RepoRoot: repoRoot}, nil
 }
 
+// Accept fast-forward-merges the worktree's HEAD into the main repository's
+// current branch, then destroys the worktree. Refuses if the main repo has
+// uncommitted changes, or if the merge isn't fast-forward-able. Both happen
+// in normal use: switching branches in the main repo, or commits landing on
+// the base branch since the worktree was created.
+//
+// Intentionally conservative: a non-ff merge could create conflicts the TUI
+// can't resolve. Users with that case can `cd` into the worktree, resolve
+// manually, then re-run accept.
+func (g *GitManager) Accept(ctx context.Context, w *Worktree) error {
+	if err := EnsureCleanTree(ctx, w.RepoRoot); err != nil {
+		return fmt.Errorf("accept: %w", err)
+	}
+	headSha, err := revParse(ctx, w.Path, "HEAD")
+	if err != nil {
+		return fmt.Errorf("accept: read worktree HEAD: %w", err)
+	}
+	repoSha, err := revParse(ctx, w.RepoRoot, "HEAD")
+	if err != nil {
+		return fmt.Errorf("accept: read repo HEAD: %w", err)
+	}
+	if headSha == repoSha {
+		// Worktree never advanced past base — nothing to merge.
+		return g.Destroy(ctx, w)
+	}
+	out, err := exec.CommandContext(ctx, "git", "-C", w.RepoRoot,
+		"merge", "--ff-only", headSha).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("accept: git merge --ff-only %s: %w: %s",
+			headSha[:8], err, strings.TrimSpace(string(out)))
+	}
+	return g.Destroy(ctx, w)
+}
+
+func revParse(ctx context.Context, dir, ref string) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", ref).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 func (g *GitManager) Destroy(ctx context.Context, w *Worktree) error {
 	out, err := exec.CommandContext(ctx, "git", "-C", w.RepoRoot,
 		"worktree", "remove", "--force", w.Path).CombinedOutput()

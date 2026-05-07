@@ -30,6 +30,9 @@ const (
 	// ModeAttached forwards every keystroke to the focused session's agent.
 	// Detach with Ctrl+Q.
 	ModeAttached
+	// ModeConfirm shows a yes/no prompt for destructive operations
+	// (discard, accept). y confirms, n/esc cancels.
+	ModeConfirm
 )
 
 // AgentFactory returns a fresh adapter per session. Injected so tests and
@@ -61,7 +64,13 @@ type Workspace struct {
 
 	toast      string
 	toastUntil time.Time
-	quitting   bool
+
+	// confirmPrompt is rendered to the user while in ModeConfirm.
+	// pendingAction runs when the user presses 'y'.
+	confirmPrompt string
+	pendingAction func() tea.Cmd
+
+	quitting bool
 }
 
 func NewWorkspace(deps WorkspaceDeps) Workspace {
@@ -82,6 +91,14 @@ type sessionEventMsg struct {
 }
 type sessionDoneMsg struct{ ID string }
 type spawnErrorMsg struct{ Err string }
+
+// sessionStatusMsg signals that a session's status changed (without
+// removing it). Workspace just needs to redraw the sidebar.
+type sessionStatusMsg struct{ ID string }
+
+// sessionRemovedMsg signals that a session is gone — discarded or
+// accepted. Workspace cleans up its terminal map and focus.
+type sessionRemovedMsg struct{ ID string }
 
 func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if sz, ok := msg.(tea.WindowSizeMsg); ok {
@@ -152,6 +169,21 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spawnErrorMsg:
 		w.setToast(m.Err)
 		return w, nil
+	case sessionStatusMsg:
+		// No-op other than triggering a redraw via the message round-trip.
+		return w, nil
+	case sessionRemovedMsg:
+		delete(w.terminals, m.ID)
+		if w.focused == m.ID {
+			// Pick another session if any remain.
+			list := w.deps.Registry.List()
+			if len(list) > 0 {
+				w.focused = list[0].Session.ID
+			} else {
+				w.focused = ""
+			}
+		}
+		return w, nil
 	}
 
 	// Route remaining messages by mode. The modal and picker need every
@@ -166,6 +198,10 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ModeAttached:
 		if key, ok := msg.(tea.KeyMsg); ok {
 			return w.handleAttachedKey(key)
+		}
+	case ModeConfirm:
+		if key, ok := msg.(tea.KeyMsg); ok {
+			return w.handleConfirmKey(key)
 		}
 	case ModeNewSession:
 		var cmd tea.Cmd
@@ -203,6 +239,59 @@ func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				w.mode = ModeAttached
 			}
 		}
+	case "x":
+		// Kill is recoverable — agent dies, worktree stays for review or
+		// later discard. No confirmation.
+		if h, ok := w.focusedHandle(); ok {
+			return w, w.killSession(h)
+		}
+	case "d":
+		// Discard destroys the worktree (and any uncommitted changes
+		// inside it). Always confirm.
+		if h, ok := w.focusedHandle(); ok {
+			id := h.Session.Label()
+			w.confirmPrompt = "discard " + id + "? worktree will be destroyed"
+			w.pendingAction = func() tea.Cmd { return w.discardSession(h) }
+			w.mode = ModeConfirm
+		}
+	case "a":
+		// Accept ff-merges into the main repo's current branch. Confirm
+		// because it modifies the repo state.
+		if h, ok := w.focusedHandle(); ok {
+			id := h.Session.Label()
+			w.confirmPrompt = "accept " + id + "? merge into current branch"
+			w.pendingAction = func() tea.Cmd { return w.acceptSession(h) }
+			w.mode = ModeConfirm
+		}
+	}
+	return w, nil
+}
+
+// focusedHandle returns the registered Handle for the currently focused
+// session, or (nil, false) if there is no focus or the focus is stale.
+func (w Workspace) focusedHandle() (*session.Handle, bool) {
+	if w.focused == "" {
+		return nil, false
+	}
+	return w.deps.Registry.Get(w.focused)
+}
+
+func (w Workspace) handleConfirmKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch k.String() {
+	case "y", "Y":
+		action := w.pendingAction
+		w.pendingAction = nil
+		w.confirmPrompt = ""
+		w.mode = ModeIdle
+		if action != nil {
+			return w, action()
+		}
+		return w, nil
+	case "n", "N", "esc":
+		w.pendingAction = nil
+		w.confirmPrompt = ""
+		w.mode = ModeIdle
+		return w, nil
 	}
 	return w, nil
 }
@@ -331,6 +420,49 @@ func (w Workspace) startSession(repo, prompt, name string) tea.Cmd {
 	}
 }
 
+// killSession terminates the focused session's agent. The worktree stays
+// on disk so the user can review or later discard.
+func (w Workspace) killSession(h *session.Handle) tea.Cmd {
+	id := h.Session.ID
+	return func() tea.Msg {
+		_ = h.Agent.Kill()
+		w.deps.Registry.SetStatus(id, session.StatusKilled)
+		return sessionStatusMsg{ID: id}
+	}
+}
+
+// discardSession kills the agent (if running), destroys the worktree, and
+// removes the session from the registry. Irreversible.
+func (w Workspace) discardSession(h *session.Handle) tea.Cmd {
+	return func() tea.Msg {
+		_ = h.Agent.Kill()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := w.deps.Git.Destroy(ctx, h.Worktree); err != nil {
+			return spawnErrorMsg{Err: "discard: " + err.Error()}
+		}
+		w.deps.Registry.Remove(h.Session.ID)
+		return sessionRemovedMsg{ID: h.Session.ID}
+	}
+}
+
+// acceptSession ff-merges the worktree's HEAD into the main repo's current
+// branch via worktree.Manager.Accept (which also destroys the worktree on
+// success), then removes the session from the registry. The agent is killed
+// first so its grip on PTY/files doesn't block the merge.
+func (w Workspace) acceptSession(h *session.Handle) tea.Cmd {
+	return func() tea.Msg {
+		_ = h.Agent.Kill()
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if err := w.deps.Git.Accept(ctx, h.Worktree); err != nil {
+			return spawnErrorMsg{Err: "accept: " + err.Error()}
+		}
+		w.deps.Registry.Remove(h.Session.ID)
+		return sessionRemovedMsg{ID: h.Session.ID}
+	}
+}
+
 // shutdownAndQuit kills every active agent in parallel, then emits QuitMsg
 // so Bubbletea exits. Worktrees stay on disk per spec — accept/discard or
 // `swarm prune` are the only paths that destroy them.
@@ -392,8 +524,19 @@ func (w Workspace) View() string {
 		return lipgloss.Place(w.width, w.height, lipgloss.Center, lipgloss.Center, w.modal.View())
 	case ModePicker:
 		return lipgloss.Place(w.width, w.height, lipgloss.Center, lipgloss.Center, w.picker.View())
+	case ModeConfirm:
+		return lipgloss.Place(w.width, w.height, lipgloss.Center, lipgloss.Center, w.renderConfirm())
 	}
 	return view
+}
+
+func (w Workspace) renderConfirm() string {
+	body := w.confirmPrompt + "\n\n" + modalHint.Render("y confirm · n / esc cancel")
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("196")).
+		Padding(1, 2).
+		Render(body)
 }
 
 func (w Workspace) renderBody() string {
@@ -432,7 +575,8 @@ func (w Workspace) renderMain(_, height int) string {
 	if w.focused == "" {
 		return "Swarm v0.0.1-dev\n\n" +
 			dim.Render("welcome. press n to spawn a session.\n\n"+
-				"q quit · n new · j/k navigate · enter attach")
+				"q quit · n new · j/k navigate · enter attach\n"+
+				"x kill · a accept · d discard")
 	}
 	term, ok := w.terminals[w.focused]
 	if !ok {

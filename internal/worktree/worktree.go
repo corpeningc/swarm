@@ -16,4 +16,9 @@ type Manager interface {
 	Destroy(ctx context.Context, w *Worktree) error
 	List(ctx context.Context, repoRoot string) ([]*Worktree, error)
 	ResolvePR(ctx context.Context, repoRoot string, prNumber int) (string, error)
+	// Accept fast-forward-merges the worktree's HEAD into the main repo's
+	// current branch and then destroys the worktree. Returns an error
+	// (without destroying the worktree) if the main repo has uncommitted
+	// changes or the merge isn't fast-forward-able.
+	Accept(ctx context.Context, w *Worktree) error
 }
