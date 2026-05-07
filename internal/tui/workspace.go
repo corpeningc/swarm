@@ -152,21 +152,27 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return w, nil
 	}
 
-	if key, ok := msg.(tea.KeyMsg); ok {
-		switch w.mode {
-		case ModeIdle:
+	// Route remaining messages by mode. The modal and picker need every
+	// message (not just keys) so async results from their tea.Cmds — like
+	// the filepicker's readDirMsg that populates the entry list — actually
+	// reach them. Idle and Attached only care about keys.
+	switch w.mode {
+	case ModeIdle:
+		if key, ok := msg.(tea.KeyMsg); ok {
 			return w.handleIdleKey(key)
-		case ModeNewSession:
-			var cmd tea.Cmd
-			w.modal, cmd = w.modal.Update(key)
-			return w, cmd
-		case ModePicker:
-			var cmd tea.Cmd
-			w.picker, cmd = w.picker.Update(key)
-			return w, cmd
-		case ModeAttached:
+		}
+	case ModeAttached:
+		if key, ok := msg.(tea.KeyMsg); ok {
 			return w.handleAttachedKey(key)
 		}
+	case ModeNewSession:
+		var cmd tea.Cmd
+		w.modal, cmd = w.modal.Update(msg)
+		return w, cmd
+	case ModePicker:
+		var cmd tea.Cmd
+		w.picker, cmd = w.picker.Update(msg)
+		return w, cmd
 	}
 
 	return w, nil
