@@ -316,7 +316,15 @@ func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	switch k.String() {
-	case "q", "ctrl+c":
+	case "q":
+		w.confirmPrompt = "quit swarm? running agents will be killed"
+		w.pendingAction = func() tea.Cmd {
+			w.quitting = true
+			return w.shutdownAndQuit()
+		}
+		w.mode = ModeConfirm
+	case "ctrl+c":
+		// Ctrl+C is the terminal-native abort, no confirmation.
 		w.quitting = true
 		return w, w.shutdownAndQuit()
 	case "n":
@@ -359,10 +367,11 @@ func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			w.pendingAction = func() tea.Cmd { return w.discardSession(h) }
 			w.mode = ModeConfirm
 		}
-	case "a":
-		// Accept ff-merges into the main repo's current branch. Confirm
-		// because it modifies the repo state. In diff view with a
-		// snapshot, we use the per-file selection.
+	case "A", "shift+a":
+		// Accept ff-merges into the main repo's current branch. Bound to
+		// shift+A to avoid accidental triggers from vim muscle memory
+		// (vim's `a` is "append after cursor"). Lowercase `a` is a
+		// no-op in idle mode for the same reason.
 		if h, ok := w.focusedHandle(); ok {
 			id := h.Session.Label()
 			snap := w.diffSnapshots[w.focused]
@@ -769,6 +778,12 @@ var (
 	repoTag    = lipgloss.NewStyle().Foreground(lipgloss.Color("147"))
 	awaitTag   = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
 	runTag     = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
+	hintTag    = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Italic(true)
+
+	// workspaceBg is the deep-purple tint we apply behind the whole TUI
+	// so panes don't sit on stark terminal black. Picked to match the
+	// ambient "we're in a special multi-agent context" vibe.
+	workspaceBg = lipgloss.Color("#1a0f26")
 	toastBox   = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Padding(0, 1)
 	attachTag  = lipgloss.NewStyle().Foreground(lipgloss.Color("16")).Background(lipgloss.Color("82")).Bold(true).Padding(0, 1)
 )
@@ -785,15 +800,25 @@ func (w Workspace) View() string {
 	status := statusBar.Width(w.width).Render(w.renderStatus())
 	view := lipgloss.JoinVertical(lipgloss.Left, body, status)
 
+	var rendered string
 	switch w.mode {
 	case ModeNewSession:
-		return lipgloss.Place(w.width, w.height, lipgloss.Center, lipgloss.Center, w.modal.View())
+		rendered = lipgloss.Place(w.width, w.height, lipgloss.Center, lipgloss.Center, w.modal.View(),
+			lipgloss.WithWhitespaceBackground(workspaceBg))
 	case ModePicker:
-		return lipgloss.Place(w.width, w.height, lipgloss.Center, lipgloss.Center, w.picker.View())
+		rendered = lipgloss.Place(w.width, w.height, lipgloss.Center, lipgloss.Center, w.picker.View(),
+			lipgloss.WithWhitespaceBackground(workspaceBg))
 	case ModeConfirm:
-		return lipgloss.Place(w.width, w.height, lipgloss.Center, lipgloss.Center, w.renderConfirm())
+		rendered = lipgloss.Place(w.width, w.height, lipgloss.Center, lipgloss.Center, w.renderConfirm(),
+			lipgloss.WithWhitespaceBackground(workspaceBg))
+	default:
+		rendered = view
 	}
-	return view
+	// Wrap the whole frame in the workspace's purple-tinted background
+	// so empty cells around panes get the brand color instead of stark
+	// terminal black. Embedded ANSI in cell content overrides locally,
+	// so colored output isn't affected.
+	return lipgloss.NewStyle().Background(workspaceBg).Render(rendered)
 }
 
 func (w Workspace) renderConfirm() string {
@@ -823,7 +848,7 @@ func (w Workspace) renderSidebar(width int) string {
 			dim.Render("(no sessions)\npress n to spawn")
 	}
 	rows := []string{"Sessions", dim.Render(strings.Repeat("─", width-2))}
-	for _, h := range list {
+	for i, h := range list {
 		// Status glyph + label gets prominence so the user can scan a
 		// long sidebar and spot what needs them.
 		var statusBit string
@@ -837,14 +862,27 @@ func (w Workspace) renderSidebar(width int) string {
 		default:
 			statusBit = dim.Render("· " + h.Session.Status.String())
 		}
-		row := fmt.Sprintf("%s  %s", h.Session.Label(), statusBit)
+		// Two-line entry per session: label + status on top, repo on a
+		// dimmed second line. Plus a blank line between entries so the
+		// sidebar reads cleanly when sessions multiply.
+		topLine := fmt.Sprintf("%s  %s", h.Session.Label(), statusBit)
+		var bottomLine string
 		if name := filepath.Base(h.Session.RepoRoot); name != "" {
-			row += " " + repoTag.Render("· "+name)
+			bottomLine = repoTag.Render("  " + name)
 		}
 		if h.Session.ID == w.focused {
-			rows = append(rows, rowFocus.Render("▎ "+row))
+			rows = append(rows, rowFocus.Render("▎ "+topLine))
+			if bottomLine != "" {
+				rows = append(rows, "  "+bottomLine)
+			}
 		} else {
-			rows = append(rows, rowDim.Render("  "+row))
+			rows = append(rows, rowDim.Render("  "+topLine))
+			if bottomLine != "" {
+				rows = append(rows, "  "+bottomLine)
+			}
+		}
+		if i < len(list)-1 {
+			rows = append(rows, "")
 		}
 	}
 	return strings.Join(rows, "\n")
@@ -855,7 +893,7 @@ func (w Workspace) renderMain(_, height int) string {
 		return "Swarm v0.0.1-dev\n\n" +
 			dim.Render("welcome. press n to spawn a session.\n\n"+
 				"q quit · n new · j/k navigate · enter attach\n"+
-				"tab diff/live · x kill · a accept · d discard")
+				"tab diff/live · x kill · A accept · d discard")
 	}
 	if w.viewMode == ViewDiff {
 		return w.renderDiff(height)
@@ -935,6 +973,12 @@ func (w Workspace) renderStatus() string {
 	var head string
 	if w.mode == ModeAttached {
 		head = attachTag.Render("ATTACHED · ctrl+q to detach") + "  "
+	} else if w.focused != "" && w.viewMode == ViewLive {
+		// Always-visible affordance: tab gets you the diff. Discoverable
+		// without reading help text.
+		head = hintTag.Render("tab → diff") + "  "
+	} else if w.focused != "" && w.viewMode == ViewDiff {
+		head = hintTag.Render("tab → live") + "  "
 	}
 	parts := []string{fmt.Sprintf("%d sessions", w.deps.Registry.Len())}
 	if w.focused != "" {

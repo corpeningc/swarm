@@ -136,3 +136,75 @@ The bug was found by:
    diverges from where the agent expects it.
 3. Grepped `\x1b\[[<>=]` in the dump → 8 occurrences in a single session
    → matched 1:1 with cursor-jump events in the replay output.
+
+---
+
+## micro-editor/terminal — 24-bit truecolor SGR support
+
+**Repo:** `github.com/micro-editor/terminal`
+**Status:** drafted, not filed
+**Suggested PR title:** `state: handle 38;2;R;G;B and 48;2;R;G;B truecolor SGR`
+
+### Bug
+
+`Color` is `uint16` and `setAttr` only recognizes `38;5;N` / `48;5;N`
+(256-color palette). Truecolor sequences like `\x1b[38;2;215;119;87m`
+fall to the "gfx attr 38 unknown" log branch — the fg stays unchanged,
+and the trailing R;G;B params get processed as separate SGR codes:
+`2` does nothing, `215`/`119`/`87` are out of every defined SGR range.
+But the iteration still walks them, so any non-RGB params interleaved
+in a compound SGR (e.g. `1;38;2;R;G;B;3`) get processed in the wrong
+context. Net effect: cells render at default fg, and emphasis state
+leaks across writes.
+
+This matters in practice because Claude Code uses truecolor
+extensively for its themed UI (orange box-drawing, dim status, etc.).
+Without 24-bit, the entire UI renders monochrome and looks broken.
+
+### Reproducer
+
+```go
+state := &terminal.State{}
+vt, _ := terminal.Create(state, io.NopCloser(bytes.NewReader(nil)))
+vt.Resize(20, 5)
+vt.Write([]byte("\x1b[38;2;215;119;87mhi"))
+ch, fg, _ := state.Cell(0, 0)
+fmt.Println(ch, fg) // 'h', DefaultFG — the truecolor was dropped
+```
+
+### Proposed fix
+
+Extend `Color` to `uint32` so encodings have room for 24-bit RGB.
+A clean encoding leaves 0–255 for ANSI/256-color, the existing
+`0xff80`/`0xff81` sentinels intact, and uses bit 24 as the truecolor
+flag: `0x1000000 | (R<<16) | (G<<8) | B`.
+
+Add to `setAttr` (mirror for `case 48`):
+
+```go
+case 38:
+    if i+2 < len(attr) && attr[i+1] == 5 {
+        // existing 256-color path
+    } else if i+4 < len(attr) && attr[i+1] == 2 {
+        i += 4
+        r, g, b := attr[i-2], attr[i-1], attr[i]
+        if rgbValid(r) && rgbValid(g) && rgbValid(b) {
+            t.cur.attr.fg = TrueColor(r, g, b)
+        }
+    }
+```
+
+Plus a `TrueColor(r, g, b int) Color` helper and an accessor so
+callers can decode without knowing the bit layout.
+
+### How Swarm worked around it locally
+
+`internal/tui/terminal.go` pre-processes every SGR sequence in
+`SessionTerminal.Feed` and rewrites any `38;2;R;G;B` / `48;2;R;G;B`
+triples to their nearest `38;5;N` / `48;5;N` approximation. Quantization
+uses the xterm 6×6×6 cube for non-gray and the 24-step grayscale ramp
+for near-gray triples. Looks correct but slightly less saturated than
+the source.
+
+The downsampler is a clean fallback even after upstream support
+lands — keeps Swarm working against older versions of the lib.
