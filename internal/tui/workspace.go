@@ -234,8 +234,10 @@ func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "k", "up":
 		w.advanceFocus(-1)
 	case "enter":
-		if w.focused != "" {
-			if _, ok := w.deps.Registry.Get(w.focused); ok {
+		if h, ok := w.focusedHandle(); ok {
+			if h.Agent == nil {
+				w.setToast("session is from a previous run; discard or accept")
+			} else {
 				w.mode = ModeAttached
 			}
 		}
@@ -243,7 +245,12 @@ func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Kill is recoverable — agent dies, worktree stays for review or
 		// later discard. No confirmation.
 		if h, ok := w.focusedHandle(); ok {
-			return w, w.killSession(h)
+			if h.Agent == nil {
+				// Restored session — no live process. Just mark killed.
+				w.deps.Registry.SetStatus(h.Session.ID, session.StatusKilled)
+			} else {
+				return w, w.killSession(h)
+			}
 		}
 	case "d":
 		// Discard destroys the worktree (and any uncommitted changes
@@ -435,7 +442,9 @@ func (w Workspace) killSession(h *session.Handle) tea.Cmd {
 // removes the session from the registry. Irreversible.
 func (w Workspace) discardSession(h *session.Handle) tea.Cmd {
 	return func() tea.Msg {
-		_ = h.Agent.Kill()
+		if h.Agent != nil {
+			_ = h.Agent.Kill()
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := w.deps.Git.Destroy(ctx, h.Worktree); err != nil {
@@ -452,7 +461,9 @@ func (w Workspace) discardSession(h *session.Handle) tea.Cmd {
 // first so its grip on PTY/files doesn't block the merge.
 func (w Workspace) acceptSession(h *session.Handle) tea.Cmd {
 	return func() tea.Msg {
-		_ = h.Agent.Kill()
+		if h.Agent != nil {
+			_ = h.Agent.Kill()
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		if err := w.deps.Git.Accept(ctx, h.Worktree); err != nil {
@@ -470,6 +481,9 @@ func (w Workspace) shutdownAndQuit() tea.Cmd {
 	return func() tea.Msg {
 		var wg sync.WaitGroup
 		for _, h := range w.deps.Registry.List() {
+			if h.Agent == nil {
+				continue
+			}
 			wg.Add(1)
 			go func(a agent.Agent) {
 				defer wg.Done()

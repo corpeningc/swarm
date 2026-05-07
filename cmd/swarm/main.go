@@ -15,6 +15,7 @@ import (
 
 	"github.com/calebcorpening/swarm/internal/agent"
 	"github.com/calebcorpening/swarm/internal/agent/claudecode"
+	"github.com/calebcorpening/swarm/internal/config"
 	"github.com/calebcorpening/swarm/internal/session"
 	"github.com/calebcorpening/swarm/internal/tui"
 	"github.com/calebcorpening/swarm/internal/worktree"
@@ -90,15 +91,25 @@ func runWorkspace(_ *cobra.Command, _ []string) error {
 		pickerStart = cwd
 	}
 
+	statePath := filepath.Join(config.Home(), "state.json")
+	registry, restored, restoreErr := session.LoadOrNewRegistry(statePath)
+	if restoreErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", restoreErr)
+	}
+
 	deps := tui.WorkspaceDeps{
-		Registry:      session.NewRegistry(),
+		Registry:      registry,
 		Git:           worktree.NewGitManager(),
 		DefaultRepo:   defaultRepo,
 		AgentFactory:  func() agent.Agent { return claudecode.New("") },
 		PickerStartIn: pickerStart,
 	}
 
-	p := tea.NewProgram(tui.NewWorkspace(deps), tea.WithAltScreen())
+	ws := tui.NewWorkspace(deps)
+	if len(restored) > 0 {
+		fmt.Fprintf(os.Stderr, "restored %d session(s) from %s\n", len(restored), statePath)
+	}
+	p := tea.NewProgram(ws, tea.WithAltScreen())
 	_, err = p.Run()
 	return err
 }

@@ -1,13 +1,77 @@
 package session
 
 import (
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 )
 
+func TestRegistry_PersistAndRestore(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+
+	r := NewRegistry(statePath)
+	id1 := r.NextID()
+	id2 := r.NextID()
+	now := time.Now()
+	r.Add(&Handle{Session: &Session{ID: id1, Name: "alpha", RepoRoot: "/r1", Status: StatusRunning, CreatedAt: now}})
+	r.Add(&Handle{Session: &Session{ID: id2, RepoRoot: "/r2", Status: StatusComplete, CreatedAt: now.Add(time.Second)}})
+
+	r2, restored, err := LoadOrNewRegistry(statePath)
+	if err != nil {
+		t.Fatalf("LoadOrNewRegistry: %v", err)
+	}
+	if r2.Len() != 2 {
+		t.Errorf("restored Len = %d, want 2", r2.Len())
+	}
+	if len(restored) != 2 {
+		t.Errorf("restored handles = %d, want 2", len(restored))
+	}
+	if next := r2.NextID(); next != "sess-003" {
+		t.Errorf("counter not restored: NextID = %q, want sess-003", next)
+	}
+	h, _ := r2.Get(id1)
+	if h.Session.Status != StatusInterrupted {
+		t.Errorf("running session not promoted to interrupted: %v", h.Session.Status)
+	}
+	if h.Agent != nil {
+		t.Errorf("restored handle Agent should be nil")
+	}
+	if h.Worktree == nil || h.Worktree.RepoRoot != "/r1" {
+		t.Errorf("worktree not rebuilt: %+v", h.Worktree)
+	}
+	h2, _ := r2.Get(id2)
+	if h2.Session.Status != StatusComplete {
+		t.Errorf("complete session got mutated on restore: %v", h2.Session.Status)
+	}
+}
+
+func TestRegistry_PersistAcrossRemove(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+
+	r := NewRegistry(statePath)
+	id := r.NextID()
+	r.Add(&Handle{Session: &Session{ID: id, CreatedAt: time.Now()}})
+	r.Remove(id)
+
+	r2, _, _ := LoadOrNewRegistry(statePath)
+	if r2.Len() != 0 {
+		t.Errorf("removed session still on disk: Len = %d", r2.Len())
+	}
+}
+
+func TestRegistry_NoPathMeansNoPersist(t *testing.T) {
+	r := NewRegistry("")
+	r.Add(&Handle{Session: &Session{ID: "x", CreatedAt: time.Now()}})
+	if r.Len() != 1 {
+		t.Errorf("Len = %d, want 1", r.Len())
+	}
+}
+
 func TestRegistry_AddGetRemove(t *testing.T) {
-	r := NewRegistry()
+	r := NewRegistry("")
 	id := r.NextID()
 	h := &Handle{Session: &Session{ID: id, Status: StatusPending, CreatedAt: time.Now()}}
 	r.Add(h)
@@ -30,7 +94,7 @@ func TestRegistry_AddGetRemove(t *testing.T) {
 }
 
 func TestRegistry_NextIDIsUnique(t *testing.T) {
-	r := NewRegistry()
+	r := NewRegistry("")
 	const n = 100
 	seen := make(map[string]struct{}, n)
 	var mu sync.Mutex
@@ -52,7 +116,7 @@ func TestRegistry_NextIDIsUnique(t *testing.T) {
 }
 
 func TestRegistry_ListIsSortedByCreation(t *testing.T) {
-	r := NewRegistry()
+	r := NewRegistry("")
 	t0 := time.Now()
 	for i := 0; i < 5; i++ {
 		id := r.NextID()
@@ -67,7 +131,7 @@ func TestRegistry_ListIsSortedByCreation(t *testing.T) {
 }
 
 func TestRegistry_SetStatus(t *testing.T) {
-	r := NewRegistry()
+	r := NewRegistry("")
 	id := r.NextID()
 	r.Add(&Handle{Session: &Session{ID: id, Status: StatusPending, CreatedAt: time.Now()}})
 	r.SetStatus(id, StatusRunning)
@@ -81,7 +145,7 @@ func TestRegistry_SetStatus(t *testing.T) {
 }
 
 func TestRegistry_ConcurrentReadersWriters(t *testing.T) {
-	r := NewRegistry()
+	r := NewRegistry("")
 	for i := 0; i < 10; i++ {
 		id := r.NextID()
 		r.Add(&Handle{Session: &Session{ID: id, CreatedAt: time.Now()}})

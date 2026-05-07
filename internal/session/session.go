@@ -13,6 +13,10 @@ const (
 	StatusComplete
 	StatusFailed
 	StatusKilled
+	// StatusInterrupted: session was running when swarm exited and got
+	// restored from state.json. The agent process is gone but the
+	// worktree may still hold uncommitted work.
+	StatusInterrupted
 )
 
 func (s Status) String() string {
@@ -29,6 +33,8 @@ func (s Status) String() string {
 		return "failed"
 	case StatusKilled:
 		return "killed"
+	case StatusInterrupted:
+		return "interrupted"
 	}
 	return "unknown"
 }
