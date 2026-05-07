@@ -2,7 +2,6 @@ package tui
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"strings"
 
@@ -58,32 +57,18 @@ func (t *SessionTerminal) Resize(cols, rows int) {
 	t.vt.Resize(cols, rows)
 }
 
-// Render walks the cell grid and returns the screen as a string with ANSI
-// color codes embedded. We track the last fg/bg we emitted and only write
-// new SGR sequences when a cell's color changes — keeping the output
-// reasonably compact even on full-color screens.
+// Render walks the cell grid and returns the screen as plain text. Color
+// and attribute preservation is a separate polish layer (cell.fg, cell.bg
+// are available — we just don't emit ANSI for them yet).
 func (t *SessionTerminal) Render() string {
 	t.state.Lock()
 	defer t.state.Unlock()
-
 	var sb strings.Builder
-	// Sentinel values we'll never match on first cell, forcing both codes
-	// to emit on the first painted glyph.
-	var lastFg, lastBg terminal.Color = 0xffff, 0xffff
-
 	for y := 0; y < t.rows; y++ {
 		for x := 0; x < t.cols; x++ {
-			ch, fg, bg := t.state.Cell(x, y)
+			ch, _, _ := t.state.Cell(x, y)
 			if ch == 0 {
 				ch = ' '
-			}
-			if fg != lastFg {
-				sb.WriteString(fgCode(fg))
-				lastFg = fg
-			}
-			if bg != lastBg {
-				sb.WriteString(bgCode(bg))
-				lastBg = bg
 			}
 			sb.WriteRune(ch)
 		}
@@ -91,40 +76,7 @@ func (t *SessionTerminal) Render() string {
 			sb.WriteByte('\n')
 		}
 	}
-	sb.WriteString("\x1b[0m")
 	return sb.String()
-}
-
-// fgCode emits the SGR sequence that sets the foreground to c. Covers the
-// 16 ANSI colors (0-15), the xterm 256-color palette (16-255), and the
-// DefaultFG sentinel.
-func fgCode(c terminal.Color) string {
-	switch {
-	case c == terminal.DefaultFG:
-		return "\x1b[39m"
-	case c < 8:
-		return fmt.Sprintf("\x1b[3%dm", c)
-	case c < 16:
-		return fmt.Sprintf("\x1b[9%dm", c-8)
-	case c < 256:
-		return fmt.Sprintf("\x1b[38;5;%dm", c)
-	}
-	return "\x1b[39m"
-}
-
-// bgCode is the background equivalent of fgCode.
-func bgCode(c terminal.Color) string {
-	switch {
-	case c == terminal.DefaultBG:
-		return "\x1b[49m"
-	case c < 8:
-		return fmt.Sprintf("\x1b[4%dm", c)
-	case c < 16:
-		return fmt.Sprintf("\x1b[10%dm", c-8)
-	case c < 256:
-		return fmt.Sprintf("\x1b[48;5;%dm", c)
-	}
-	return "\x1b[49m"
 }
 
 // Size reports the current terminal dimensions.

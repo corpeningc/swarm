@@ -1,38 +1,28 @@
 package tui
 
 import (
-	"regexp"
 	"strings"
 	"testing"
 )
 
-// ansiStripPattern is for tests that want to assert on rendered text
-// without caring about embedded SGR codes.
-var ansiStripPattern = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
-
-func stripANSI(s string) string {
-	return ansiStripPattern.ReplaceAllString(s, "")
-}
-
 func TestSessionTerminal_PlainText(t *testing.T) {
 	st := NewSessionTerminal(80, 24)
 	st.Feed([]byte("hello world\r\n"))
-	if !strings.Contains(stripANSI(st.Render()), "hello world") {
-		t.Errorf("plain text not rendered; got %q", st.Render())
+	got := st.Render()
+	if !strings.Contains(got, "hello world") {
+		t.Errorf("plain text not rendered; got %q", got)
 	}
 }
 
-func TestSessionTerminal_PreservesANSIColors(t *testing.T) {
+func TestSessionTerminal_StripsANSI(t *testing.T) {
 	st := NewSessionTerminal(80, 24)
 	st.Feed([]byte("\x1b[31mred\x1b[0m text\r\n"))
 	got := st.Render()
-	if !strings.Contains(stripANSI(got), "red text") {
+	if !strings.Contains(got, "red text") {
 		t.Errorf("ANSI-bracketed text not preserved; got %q", got)
 	}
-	// Render re-emits color per cell, so the red SGR must appear in the
-	// output for the actual TUI to display the color.
-	if !strings.Contains(got, "\x1b[31m") {
-		t.Errorf("expected red SGR code in render; got %q", got)
+	if strings.Contains(got, "\x1b[") {
+		t.Errorf("escape sequences leaked through; got %q", got)
 	}
 }
 
@@ -41,9 +31,10 @@ func TestSessionTerminal_CursorMoves(t *testing.T) {
 	// Write 'aaa', move cursor home, overwrite with 'b': result should
 	// start with 'baa' — proving the emulator interprets cursor moves.
 	st.Feed([]byte("aaa\x1b[Hb"))
-	first := strings.SplitN(stripANSI(st.Render()), "\n", 2)[0]
+	got := st.Render()
+	first := strings.SplitN(got, "\n", 2)[0]
 	if !strings.HasPrefix(first, "baa") {
-		t.Errorf("cursor move not honored; first line = %q", first)
+		t.Errorf("cursor move not honored; first line = %q (full = %q)", first, got)
 	}
 }
 
