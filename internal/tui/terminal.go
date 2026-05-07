@@ -1,75 +1,87 @@
 package tui
 
 import (
-	"regexp"
+	"bytes"
+	"io"
+	"strings"
 
-	"github.com/hinshun/vt10x"
+	"github.com/micro-editor/terminal"
 )
 
-// altScreenPattern matches the private mode codes that swap between the
-// main and alternate screen buffers (and their saved-cursor variants).
-// vt10x doesn't track an alt-screen buffer cleanly; if we let these
-// through, Claude draws into a buffer we never read, then re-attaching
-// shows incoherent state. Filtering them out forces every paint onto the
-// main screen, which is what we render. Diagnostic experiment — if this
-// resolves the symptoms we keep vt10x; if not, we're swapping emulators.
+// SessionTerminal is the per-session virtual terminal. Bytes from the agent's
+// PTY get fed in via Feed; the screen state is read out via Render and shown
+// in the focused pane. Built on github.com/micro-editor/terminal — chosen
+// because its alt-screen swap is properly implemented (state.go:swapScreen),
+// which is what we need for Claude Code's TUI to survive detach/re-attach
+// cycles.
 //
-// Codes covered:
-//
-//	?47h  / ?47l    — original DECSET alt screen
-//	?1047h / ?1047l — alt screen w/ implicit clear
-//	?1048h / ?1048l — DEC save/restore cursor
-//	?1049h / ?1049l — modern combined save+swap
-var altScreenPattern = regexp.MustCompile(`\x1b\[\?(47|1047|1048|1049)[hl]`)
-
-// SessionTerminal is the per-session virtual terminal. We feed it the bytes
-// emitted by the agent's PTY and render its current screen state into the
-// main pane. This is what makes Claude Code's cursor-positioned TUI render
-// correctly inside Bubbletea instead of streaming raw escape codes.
-//
-// SessionTerminal is not safe for concurrent use; callers must serialize
-// Feed / Resize / Render. Bubbletea's single-goroutine Update loop satisfies
-// this naturally.
+// SessionTerminal is not safe for concurrent Feed/Resize, but the underlying
+// State protects itself with a lock so Render can safely race with Feed if
+// needed. Bubbletea's single-goroutine Update loop makes this academic.
 type SessionTerminal struct {
-	term vt10x.Terminal
+	state      *terminal.State
+	vt         *terminal.VT
+	cols, rows int
 }
 
 // NewSessionTerminal constructs a virtual terminal sized to (cols, rows),
 // clamped to a sane minimum so a 0-sized pane during early renders doesn't
-// crash vt10x.
+// confuse the emulator.
 func NewSessionTerminal(cols, rows int) *SessionTerminal {
 	cols = clampMin(cols, 20)
 	rows = clampMin(rows, 5)
-	return &SessionTerminal{term: vt10x.New(vt10x.WithSize(cols, rows))}
+	state := &terminal.State{}
+	// Create requires a ReadCloser even when we never call Parse. We feed
+	// bytes via Write() instead, so a dead source is fine.
+	vt, _ := terminal.Create(state, io.NopCloser(bytes.NewReader(nil)))
+	vt.Resize(cols, rows)
+	return &SessionTerminal{state: state, vt: vt, cols: cols, rows: rows}
 }
 
-// Feed writes bytes from the agent into the virtual terminal, parsing escape
-// sequences and updating the screen. Alt-screen mode swaps are filtered out
-// so vt10x's incomplete alt-screen support doesn't corrupt our render.
+// Feed parses bytes from the agent into the virtual terminal. Despite the
+// underlying API name, VT.Write doesn't write to a PTY — it parses input
+// into screen state.
 func (t *SessionTerminal) Feed(b []byte) {
 	if len(b) == 0 {
 		return
 	}
-	b = altScreenPattern.ReplaceAll(b, nil)
-	_, _ = t.term.Write(b)
+	_, _ = t.vt.Write(b)
 }
 
 // Resize updates the virtual terminal dimensions. The agent's PTY should be
 // resized to match — see Workspace.resizeAllSessions.
 func (t *SessionTerminal) Resize(cols, rows int) {
-	t.term.Resize(clampMin(cols, 20), clampMin(rows, 5))
+	cols = clampMin(cols, 20)
+	rows = clampMin(rows, 5)
+	t.cols, t.rows = cols, rows
+	t.vt.Resize(cols, rows)
 }
 
-// Render returns the current screen as plain text. Colors and attributes are
-// not yet preserved; that's a polish layer (cell walk + ANSI re-emit) for
-// later.
+// Render walks the cell grid and returns the screen as plain text. Color
+// and attribute preservation is a separate polish layer (cell.fg, cell.bg
+// are available — we just don't emit ANSI for them yet).
 func (t *SessionTerminal) Render() string {
-	return t.term.String()
+	t.state.Lock()
+	defer t.state.Unlock()
+	var sb strings.Builder
+	for y := 0; y < t.rows; y++ {
+		for x := 0; x < t.cols; x++ {
+			ch, _, _ := t.state.Cell(x, y)
+			if ch == 0 {
+				ch = ' '
+			}
+			sb.WriteRune(ch)
+		}
+		if y < t.rows-1 {
+			sb.WriteByte('\n')
+		}
+	}
+	return sb.String()
 }
 
 // Size reports the current terminal dimensions.
 func (t *SessionTerminal) Size() (cols, rows int) {
-	return t.term.Size()
+	return t.cols, t.rows
 }
 
 func clampMin(n, lo int) int {

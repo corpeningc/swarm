@@ -28,8 +28,8 @@ func TestSessionTerminal_StripsANSI(t *testing.T) {
 
 func TestSessionTerminal_CursorMoves(t *testing.T) {
 	st := NewSessionTerminal(20, 5)
-	// Write 'aaa', then move cursor home, overwrite with 'b': result should
-	// have 'baa' at the top — proving the emulator interprets cursor moves.
+	// Write 'aaa', move cursor home, overwrite with 'b': result should
+	// start with 'baa' — proving the emulator interprets cursor moves.
 	st.Feed([]byte("aaa\x1b[Hb"))
 	got := st.Render()
 	first := strings.SplitN(got, "\n", 2)[0]
@@ -59,38 +59,21 @@ func TestSessionTerminal_TinySizeClamped(t *testing.T) {
 	}
 }
 
-func TestSessionTerminal_AltScreenStripped(t *testing.T) {
+// TestSessionTerminal_AltScreenSurvivesSwap exercises the property that
+// motivated swapping emulators: enter alt screen, draw, exit alt screen,
+// the original main-screen content should be visible again. vt10x failed
+// this; micro-editor/terminal must pass it.
+func TestSessionTerminal_AltScreenSurvivesSwap(t *testing.T) {
 	st := NewSessionTerminal(40, 5)
-	// Sequence Claude actually emits on launch: enter alt screen, render
-	// content, exit alt. With the filter, the content paints on main and
-	// Render shows it.
-	st.Feed([]byte("\x1b[?1049hHello from alt\x1b[?1049l"))
+	// Paint on the main screen first.
+	st.Feed([]byte("MAIN-content\r\n"))
+	// Enter alt, draw, exit alt.
+	st.Feed([]byte("\x1b[?1049hALT-content\x1b[?1049l"))
 	got := st.Render()
-	if !strings.Contains(got, "Hello from alt") {
-		t.Errorf("alt-screen content lost; got %q", got)
+	if !strings.Contains(got, "MAIN-content") {
+		t.Errorf("alt-screen swap clobbered main-screen content; got %q", got)
 	}
-	if strings.Contains(got, "1049") {
-		t.Errorf("escape sequence digits leaked through; got %q", got)
-	}
-}
-
-func TestSessionTerminal_AltScreenAllVariants(t *testing.T) {
-	cases := []string{
-		"\x1b[?47h",
-		"\x1b[?47l",
-		"\x1b[?1047h",
-		"\x1b[?1047l",
-		"\x1b[?1048h",
-		"\x1b[?1048l",
-		"\x1b[?1049h",
-		"\x1b[?1049l",
-	}
-	for _, code := range cases {
-		st := NewSessionTerminal(40, 3)
-		st.Feed([]byte(code + "marker"))
-		got := st.Render()
-		if !strings.Contains(got, "marker") {
-			t.Errorf("filter dropped content for %q; got %q", code, got)
-		}
+	if strings.Contains(got, "ALT-content") {
+		t.Errorf("alt-screen content leaked into main-screen render; got %q", got)
 	}
 }
