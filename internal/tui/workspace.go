@@ -93,7 +93,7 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
 	case NewSessionSubmittedMsg:
 		w.mode = ModeIdle
-		return w, w.startSession(m.Repo, m.Prompt)
+		return w, w.startSession(m.Repo, m.Prompt, m.Name)
 	case NewSessionCanceledMsg:
 		w.mode = ModeIdle
 		return w, nil
@@ -276,7 +276,7 @@ func (w *Workspace) setToast(s string) {
 // startSession runs the heavy work (worktree create + agent spawn) off the UI
 // goroutine. The result is delivered as a Bubbletea message so all state
 // mutations stay single-threaded inside Update.
-func (w Workspace) startSession(repo, prompt string) tea.Cmd {
+func (w Workspace) startSession(repo, prompt, name string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -293,7 +293,7 @@ func (w Workspace) startSession(repo, prompt string) tea.Cmd {
 		now := time.Now()
 		h := &session.Handle{
 			Session: &session.Session{
-				ID: id, RepoRoot: repo, BaseRef: "HEAD",
+				ID: id, Name: name, RepoRoot: repo, BaseRef: "HEAD",
 				Worktree: wt.Path, AgentName: "claude-code",
 				Prompt: prompt, Status: session.StatusRunning,
 				CreatedAt: now, UpdatedAt: now,
@@ -371,7 +371,7 @@ func (w Workspace) renderSidebar(width int) string {
 	}
 	rows := []string{"Sessions", dim.Render(strings.Repeat("─", width-2))}
 	for _, h := range list {
-		row := fmt.Sprintf("%s %s", h.Session.ID, h.Session.Status)
+		row := fmt.Sprintf("%s %s", h.Session.Label(), h.Session.Status)
 		if name := filepath.Base(h.Session.RepoRoot); name != "" {
 			row += " " + repoTag.Render("· "+name)
 		}
@@ -409,7 +409,11 @@ func (w Workspace) renderStatus() string {
 	}
 	parts := []string{fmt.Sprintf("%d sessions", w.deps.Registry.Len())}
 	if w.focused != "" {
-		parts = append(parts, "focus="+w.focused)
+		label := w.focused
+		if h, ok := w.deps.Registry.Get(w.focused); ok {
+			label = h.Session.Label()
+		}
+		parts = append(parts, "focus="+label)
 	}
 	parts = append(parts, fmt.Sprintf("%dx%d", w.width, w.height))
 	left := head + strings.Join(parts, " · ")

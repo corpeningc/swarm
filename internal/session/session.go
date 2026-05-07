@@ -34,13 +34,23 @@ func (s Status) String() string {
 }
 
 type Session struct {
-	ID         string
-	RepoRoot   string
-	BaseRef    string
-	Worktree   string
-	AgentName  string
-	Prompt     string
-	Status     Status
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	ID        string
+	Name      string // optional user label; Label() falls back to ID when empty
+	RepoRoot  string
+	BaseRef   string
+	Worktree  string
+	AgentName string
+	Prompt    string
+	Status    Status
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// Label is the identifier shown to the user — the user-supplied name when
+// set, otherwise the auto-generated ID. Always non-empty.
+func (s *Session) Label() string {
+	if s.Name != "" {
+		return s.Name
+	}
+	return s.ID
 }
