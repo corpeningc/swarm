@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -130,11 +131,15 @@ func runWorkspace(_ *cobra.Command, _ []string) error {
 }
 
 // runHook is invoked by Claude Code's hook system inside a spawned session.
-// It just touches a marker file whose existence the parent swarm process
-// detects on its activity tick to update the session's status. Reads the
-// hooks directory from SWARM_HOOKS_DIR (set by the adapter when spawning).
-// On any error or missing env we no-op silently — Claude doesn't care, and
-// we don't want a failing hook to interrupt the agent's flow.
+// Writes a marker file whose existence the parent swarm process detects on
+// its activity tick. If Claude piped a JSON payload on stdin (which it does
+// for SessionStart, Stop, and Notification), the payload is the file's
+// content; otherwise it's an empty marker. The parent process reads the
+// JSON to extract details like the Claude session UUID.
+//
+// Reads the hooks directory from SWARM_HOOKS_DIR (set by the adapter when
+// spawning). On any error or missing env we no-op silently — Claude doesn't
+// care, and we don't want a failing hook to interrupt the agent's flow.
 func runHook(_ *cobra.Command, args []string) error {
 	hooksDir := os.Getenv("SWARM_HOOKS_DIR")
 	if hooksDir == "" {
@@ -146,11 +151,13 @@ func runHook(_ *cobra.Command, args []string) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 		return nil
 	}
-	f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
+	// Best-effort: read whatever Claude piped on stdin (~1KB JSON payload
+	// for SessionStart). If reading fails or stdin is empty, we still
+	// create an empty marker so the parent's existence check fires.
+	payload, _ := io.ReadAll(os.Stdin)
+	if err := os.WriteFile(target, payload, 0644); err != nil {
 		return nil
 	}
-	_ = f.Close()
 	return nil
 }
 

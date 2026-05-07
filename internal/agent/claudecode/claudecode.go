@@ -305,6 +305,11 @@ func writeClaudeHooks(worktree, hooksDir, sessionID string) error {
 		"hooks": map[string]any{
 			"Stop":         mkHook("stop"),
 			"Notification": mkHook("notify"),
+			// SessionStart fires once at session creation (and on resume).
+			// Its JSON payload includes session_id — captured by swarm
+			// hook into <hooks>/<id>/session_start so the parent process
+			// can persist it without scraping PTY output.
+			"SessionStart": mkHook("session_start"),
 		},
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")

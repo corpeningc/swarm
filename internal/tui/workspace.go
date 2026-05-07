@@ -554,10 +554,15 @@ func (w Workspace) mainPaneSize() (cols, rows int) {
 	return clampMin(mainW-2, 20), clampMin(bodyH-2, 5)
 }
 
-// checkHooks polls each session's marker dir for stop/notify files left
-// by Claude Code's hook system. Their presence is a precise "agent paused
-// for input" signal — much faster than the silence heuristic. We delete
-// the marker after consuming so it represents only the most recent event.
+// checkHooks polls each session's marker dir for files dropped by Claude
+// Code's hook system:
+//
+//   - stop / notify: presence = agent paused for input. Flip status to
+//     awaiting and remove the marker.
+//   - session_start: contains the full JSON payload Claude piped to the
+//     hook, including the session_id we want to use for `--resume` later.
+//     Read once, persist to the session, leave the file in place as a
+//     cache (rewrites are idempotent).
 func (w *Workspace) checkHooks() {
 	for _, h := range w.deps.Registry.List() {
 		if h.Worktree == nil {
@@ -573,7 +578,40 @@ func (w *Workspace) checkHooks() {
 				}
 			}
 		}
+		if h.Session.ClaudeSessionID == "" {
+			path := filepath.Join(hooksSession, "session_start")
+			if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+				if id := extractSessionID(data); id != "" {
+					h.Session.ClaudeSessionID = id
+					// Triggers persist via the SetStatus write path.
+					w.deps.Registry.SetStatus(h.Session.ID, h.Session.Status)
+				}
+			}
+		}
 	}
+}
+
+// extractSessionID pulls "session_id" out of the JSON payload Claude sends
+// to SessionStart hooks. Tolerant of the field appearing anywhere; we don't
+// fully decode the JSON to keep the dependency footprint zero.
+func extractSessionID(payload []byte) string {
+	const key = `"session_id"`
+	idx := strings.Index(string(payload), key)
+	if idx < 0 {
+		return ""
+	}
+	rest := string(payload[idx+len(key):])
+	// Skip past the colon and any whitespace, expect a quote.
+	rest = strings.TrimLeft(rest, ": \t\r\n")
+	if !strings.HasPrefix(rest, `"`) {
+		return ""
+	}
+	rest = rest[1:]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
 }
 
 // evaluateAwaitingInput flips every Running session that's been silent
