@@ -17,6 +17,7 @@ import (
 
 	"github.com/calebcorpening/swarm/internal/agent"
 	"github.com/calebcorpening/swarm/internal/config"
+	"github.com/calebcorpening/swarm/internal/memory"
 	"github.com/calebcorpening/swarm/internal/session"
 	"github.com/calebcorpening/swarm/internal/worktree"
 )
@@ -716,9 +717,16 @@ func (w Workspace) startSession(repo, prompt, name string) tea.Cmd {
 		a := w.deps.AgentFactory()
 		hooksDir := filepath.Join(repo, ".swarm", "hooks")
 		_ = os.MkdirAll(filepath.Join(hooksDir, dirName), 0755)
+		// Inject project memory only on a fresh conversation. When we're
+		// resuming, the agent already has the prior context; piling
+		// memory on top would duplicate it.
+		effectivePrompt := prompt
+		if resumeID == "" {
+			effectivePrompt = memory.PromptWithMemory(repo, prompt)
+		}
 		opts := agent.SpawnOpts{
 			Cwd:       wt.Path,
-			Prompt:    prompt,
+			Prompt:    effectivePrompt,
 			SessionID: dirName,
 			HooksDir:  hooksDir,
 			ResumeID:  resumeID,
@@ -849,6 +857,7 @@ func (w Workspace) acceptSessionSelective(h *session.Handle, discardFiles []stri
 		if err := w.deps.Git.AcceptSelective(ctx, h.Worktree, discardFiles); err != nil {
 			return spawnErrorMsg{Err: "accept: " + err.Error()}
 		}
+		_ = memory.Append(h.Session.RepoRoot, memory.AcceptedEntry(h.Session.Label(), h.Session.Prompt))
 		w.deps.Registry.Remove(h.Session.ID)
 		return sessionRemovedMsg{ID: h.Session.ID}
 	}
@@ -868,6 +877,7 @@ func (w Workspace) acceptSession(h *session.Handle) tea.Cmd {
 		if err := w.deps.Git.Accept(ctx, h.Worktree); err != nil {
 			return spawnErrorMsg{Err: "accept: " + err.Error()}
 		}
+		_ = memory.Append(h.Session.RepoRoot, memory.AcceptedEntry(h.Session.Label(), h.Session.Prompt))
 		w.deps.Registry.Remove(h.Session.ID)
 		return sessionRemovedMsg{ID: h.Session.ID}
 	}
