@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -75,12 +76,23 @@ func (a *Adapter) Spawn(ctx context.Context, opts agent.SpawnOpts) error {
 		return fmt.Errorf("claudecode: already spawned")
 	}
 
+	// Resolve the binary on PATH ourselves. go-pty on Windows joins a
+	// relative Path with Dir (and skips real PATH lookup) when both are
+	// set, which would make exec try `<worktree>/claude` instead of the
+	// installed claude binary. exec.LookPath returns an absolute path on
+	// every platform and on Windows automatically appends PATHEXT
+	// extensions (so npm's claude.cmd shim resolves correctly).
+	binPath, err := exec.LookPath(a.binary)
+	if err != nil {
+		return fmt.Errorf("claudecode: %s not found on PATH: %w", a.binary, err)
+	}
+
 	pt, err := pty.New()
 	if err != nil {
 		return fmt.Errorf("claudecode: pty.New: %w", err)
 	}
 
-	cmd := pt.CommandContext(ctx, a.binary, buildArgs(opts)...)
+	cmd := pt.CommandContext(ctx, binPath, buildArgs(opts)...)
 	cmd.Dir = opts.Cwd
 	cmd.Env = mergeEnv(opts.Env)
 
