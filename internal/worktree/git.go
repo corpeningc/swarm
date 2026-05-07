@@ -51,18 +51,23 @@ func (g *GitManager) Create(ctx context.Context, repoRoot, baseRef, id string) (
 	return &Worktree{ID: id, Path: path, BaseRef: baseRef, RepoRoot: repoRoot}, nil
 }
 
-// Accept fast-forward-merges the worktree's HEAD into the main repository's
-// current branch, then destroys the worktree. Refuses if the main repo has
-// uncommitted changes, or if the merge isn't fast-forward-able. Both happen
-// in normal use: switching branches in the main repo, or commits landing on
-// the base branch since the worktree was created.
+// Accept brings a worktree's changes into the main repo's current branch,
+// then destroys the worktree. Refuses if the main repo has uncommitted
+// changes or the merge isn't fast-forward-able.
 //
-// Intentionally conservative: a non-ff merge could create conflicts the TUI
-// can't resolve. Users with that case can `cd` into the worktree, resolve
-// manually, then re-run accept.
+// Behavior covers both common cases:
+//   - Worktree already has commits past the base ref → ff-merge them.
+//   - Worktree has only uncommitted changes → commit them as a new tip
+//     ("swarm: accept session <id>"), then ff-merge.
+//
+// AcceptSelective covers the file-level path: revert specific files to
+// the base before falling through to this same logic.
 func (g *GitManager) Accept(ctx context.Context, w *Worktree) error {
 	if err := EnsureCleanTree(ctx, w.RepoRoot); err != nil {
 		return fmt.Errorf("accept: %w", err)
+	}
+	if err := commitWorktreeIfDirty(ctx, w, "swarm: accept session "+w.ID); err != nil {
+		return fmt.Errorf("accept: commit worktree: %w", err)
 	}
 	headSha, err := revParse(ctx, w.Path, "HEAD")
 	if err != nil {
@@ -83,6 +88,65 @@ func (g *GitManager) Accept(ctx context.Context, w *Worktree) error {
 			headSha[:8], err, strings.TrimSpace(string(out)))
 	}
 	return g.Destroy(ctx, w)
+}
+
+// AcceptSelective is Accept's file-level cousin. discardFiles are reverted
+// in the worktree to their base-ref state before we commit-and-merge what's
+// left. Used by the diff view when the user marks some files keep and
+// others discard.
+func (g *GitManager) AcceptSelective(ctx context.Context, w *Worktree, discardFiles []string) error {
+	if err := EnsureCleanTree(ctx, w.RepoRoot); err != nil {
+		return fmt.Errorf("accept: %w", err)
+	}
+	for _, f := range discardFiles {
+		if err := revertFileToBase(ctx, w.Path, w.BaseRef, f); err != nil {
+			return fmt.Errorf("accept: revert %s: %w", f, err)
+		}
+	}
+	return g.Accept(ctx, w)
+}
+
+// commitWorktreeIfDirty stages and commits all changes in the worktree if
+// any are present. No-op on a clean tree.
+func commitWorktreeIfDirty(ctx context.Context, w *Worktree, msg string) error {
+	out, err := exec.CommandContext(ctx, "git", "-C", w.Path, "status", "--porcelain").Output()
+	if err != nil {
+		return err
+	}
+	if len(strings.TrimSpace(string(out))) == 0 {
+		return nil
+	}
+	if out, err := exec.CommandContext(ctx, "git", "-C", w.Path, "add", "-A").CombinedOutput(); err != nil {
+		return fmt.Errorf("git add: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", w.Path, "commit", "-m", msg)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=swarm",
+		"GIT_AUTHOR_EMAIL=swarm@local",
+		"GIT_COMMITTER_NAME=swarm",
+		"GIT_COMMITTER_EMAIL=swarm@local",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git commit: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// revertFileToBase resets one file in the worktree to its content at the
+// base ref. If the file didn't exist in the base (i.e. it's an addition the
+// agent made), removes the file from the worktree instead.
+func revertFileToBase(ctx context.Context, wtPath, baseRef, file string) error {
+	if baseRef == "" {
+		baseRef = "HEAD"
+	}
+	if out, err := exec.CommandContext(ctx, "git", "-C", wtPath,
+		"checkout", baseRef, "--", file).CombinedOutput(); err == nil {
+		return nil
+	} else {
+		// Likely the file didn't exist in base — remove it.
+		_ = out
+	}
+	return os.RemoveAll(filepath.Join(wtPath, file))
 }
 
 func revParse(ctx context.Context, dir, ref string) (string, error) {

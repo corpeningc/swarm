@@ -75,9 +75,10 @@ type Workspace struct {
 
 	// viewMode picks what the main pane shows for the focused session.
 	viewMode ViewMode
-	// diffCache holds the most-recently-fetched git diff per session,
-	// keyed by session ID. Refreshed on D-toggle or 'r'.
-	diffCache map[string]string
+	// diffSnapshots holds the most-recently-fetched parsed diff per
+	// session, with the user's keep/discard selection. Refreshed on
+	// tab-toggle or 'r'.
+	diffSnapshots map[string]*DiffSnapshot
 
 	// lastActivity is the wall-clock time of the most recent agent event
 	// for each session, used to flip running ↔ awaiting-input.
@@ -96,10 +97,10 @@ type Workspace struct {
 
 func NewWorkspace(deps WorkspaceDeps) Workspace {
 	return Workspace{
-		deps:         deps,
-		terminals:    make(map[string]*SessionTerminal),
-		diffCache:    make(map[string]string),
-		lastActivity: make(map[string]time.Time),
+		deps:          deps,
+		terminals:     make(map[string]*SessionTerminal),
+		diffSnapshots: make(map[string]*DiffSnapshot),
+		lastActivity:  make(map[string]time.Time),
 	}
 }
 
@@ -141,11 +142,11 @@ type sessionStatusMsg struct{ ID string }
 // accepted. Workspace cleans up its terminal map and focus.
 type sessionRemovedMsg struct{ ID string }
 
-// diffRefreshedMsg carries fresh `git diff` output for a session.
+// diffRefreshedMsg carries a freshly-parsed diff snapshot for a session.
 type diffRefreshedMsg struct {
-	ID   string
-	Diff string
-	Err  string
+	ID       string
+	Snapshot *DiffSnapshot
+	Err      string
 }
 
 func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -232,7 +233,7 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return w, nil
 	case sessionRemovedMsg:
 		delete(w.terminals, m.ID)
-		delete(w.diffCache, m.ID)
+		delete(w.diffSnapshots, m.ID)
 		if w.focused == m.ID {
 			// Pick another session if any remain.
 			list := w.deps.Registry.List()
@@ -247,7 +248,21 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.Err != "" {
 			w.setToast(m.Err)
 		} else {
-			w.diffCache[m.ID] = m.Diff
+			// If the user already had a snapshot with selection state,
+			// preserve it across refresh by carrying over Keep flags
+			// for any path that's still present.
+			if prev, ok := w.diffSnapshots[m.ID]; ok && prev != nil {
+				kept := make(map[string]bool, len(prev.Files))
+				for _, f := range prev.Files {
+					kept[f.Path] = f.Keep
+				}
+				for _, f := range m.Snapshot.Files {
+					if v, ok := kept[f.Path]; ok {
+						f.Keep = v
+					}
+				}
+			}
+			w.diffSnapshots[m.ID] = m.Snapshot
 		}
 		return w, nil
 	}
@@ -283,6 +298,12 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Diff view repurposes j/k/space for file navigation.
+	if w.viewMode == ViewDiff {
+		if model, cmd, handled := w.handleDiffKey(k); handled {
+			return model, cmd
+		}
+	}
 	switch k.String() {
 	case "q", "ctrl+c":
 		w.quitting = true
@@ -329,16 +350,33 @@ func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "a":
 		// Accept ff-merges into the main repo's current branch. Confirm
-		// because it modifies the repo state.
+		// because it modifies the repo state. In diff view with a
+		// snapshot, we use the per-file selection.
 		if h, ok := w.focusedHandle(); ok {
 			id := h.Session.Label()
-			w.confirmPrompt = "accept " + id + "? merge into current branch"
-			w.pendingAction = func() tea.Cmd { return w.acceptSession(h) }
+			snap := w.diffSnapshots[w.focused]
+			if w.viewMode == ViewDiff && snap != nil && len(snap.Files) > 0 {
+				kept := len(snap.SelectedFiles())
+				total := len(snap.Files)
+				w.confirmPrompt = fmt.Sprintf("accept %s? %d of %d files kept", id, kept, total)
+				w.pendingAction = func() tea.Cmd { return w.acceptSessionSelective(h, snap.DiscardedFiles()) }
+			} else {
+				w.confirmPrompt = "accept " + id + "? merge into current branch"
+				w.pendingAction = func() tea.Cmd { return w.acceptSession(h) }
+			}
 			w.mode = ModeConfirm
 		}
+	case "tab":
+		// Tab toggles the main pane between live agent output and the
+		// session's git diff vs its base ref. (D / shift+D kept as
+		// aliases for muscle memory but Tab is the primary binding.)
+		if w.viewMode == ViewDiff {
+			w.viewMode = ViewLive
+		} else if h, ok := w.focusedHandle(); ok {
+			w.viewMode = ViewDiff
+			return w, w.refreshDiff(h)
+		}
 	case "D", "shift+d":
-		// Toggle the main pane between live agent output and the
-		// session's git diff vs its base ref.
 		if w.viewMode == ViewDiff {
 			w.viewMode = ViewLive
 		} else if h, ok := w.focusedHandle(); ok {
@@ -354,6 +392,29 @@ func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return w, nil
+}
+
+// handleDiffKey is the diff-view-specific keymap. j/k navigate files,
+// space toggles keep/discard for the highlighted file. Returns
+// (model, cmd, handled): handled=false means handleIdleKey should
+// continue with its session-level keymap.
+func (w Workspace) handleDiffKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
+	snap := w.diffSnapshots[w.focused]
+	if snap == nil || len(snap.Files) == 0 {
+		return w, nil, false
+	}
+	switch k.String() {
+	case "j", "down":
+		snap.Cursor = (snap.Cursor + 1) % len(snap.Files)
+		return w, nil, true
+	case "k", "up":
+		snap.Cursor = (snap.Cursor - 1 + len(snap.Files)) % len(snap.Files)
+		return w, nil, true
+	case " ", "space":
+		snap.Files[snap.Cursor].Keep = !snap.Files[snap.Cursor].Keep
+		return w, nil, true
+	}
+	return w, nil, false
 }
 
 // focusedHandle returns the registered Handle for the currently focused
@@ -553,10 +614,7 @@ func (w Workspace) refreshDiff(h *session.Handle) tea.Cmd {
 		if err != nil {
 			return diffRefreshedMsg{ID: id, Err: "diff: " + strings.TrimSpace(string(out))}
 		}
-		if len(out) == 0 {
-			return diffRefreshedMsg{ID: id, Diff: "(no changes)"}
-		}
-		return diffRefreshedMsg{ID: id, Diff: string(out)}
+		return diffRefreshedMsg{ID: id, Snapshot: parseDiff(string(out))}
 	}
 }
 
@@ -582,6 +640,23 @@ func (w Workspace) discardSession(h *session.Handle) tea.Cmd {
 		defer cancel()
 		if err := w.deps.Git.Destroy(ctx, h.Worktree); err != nil {
 			return spawnErrorMsg{Err: "discard: " + err.Error()}
+		}
+		w.deps.Registry.Remove(h.Session.ID)
+		return sessionRemovedMsg{ID: h.Session.ID}
+	}
+}
+
+// acceptSessionSelective is the file-level cousin of acceptSession.
+// discardFiles are reverted in the worktree before commit-and-merge.
+func (w Workspace) acceptSessionSelective(h *session.Handle, discardFiles []string) tea.Cmd {
+	return func() tea.Msg {
+		if h.Agent != nil {
+			_ = h.Agent.Kill()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if err := w.deps.Git.AcceptSelective(ctx, h.Worktree, discardFiles); err != nil {
+			return spawnErrorMsg{Err: "accept: " + err.Error()}
 		}
 		w.deps.Registry.Remove(h.Session.ID)
 		return sessionRemovedMsg{ID: h.Session.ID}
@@ -738,7 +813,7 @@ func (w Workspace) renderMain(_, height int) string {
 		return "Swarm v0.0.1-dev\n\n" +
 			dim.Render("welcome. press n to spawn a session.\n\n"+
 				"q quit · n new · j/k navigate · enter attach\n"+
-				"x kill · a accept · d discard · D diff")
+				"tab diff/live · x kill · a accept · d discard")
 	}
 	if w.viewMode == ViewDiff {
 		return w.renderDiff(height)
@@ -755,24 +830,63 @@ func (w Workspace) renderMain(_, height int) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderDiff returns the cached `git diff` output for the focused session,
-// truncated to the visible height. The header reminds the user this is
-// a snapshot.
+// renderDiff lays out the per-file selection list above the diff content
+// of the cursor's file. j/k or arrows navigate files, space toggles
+// keep/discard, 'a' starts the (selection-aware) accept flow.
 func (w Workspace) renderDiff(height int) string {
-	header := dim.Render("DIFF · D back to live · r refresh") + "\n"
-	body, ok := w.diffCache[w.focused]
-	if !ok {
-		return header + dim.Render("loading diff…")
+	header := dim.Render("DIFF · tab back · j/k file · space keep/discard · a accept · r refresh")
+	snap := w.diffSnapshots[w.focused]
+	if snap == nil {
+		return header + "\n" + dim.Render("loading diff…")
 	}
-	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
-	visible := height - 2
-	if visible < 1 {
-		visible = 1
+	if len(snap.Files) == 0 {
+		return header + "\n" + dim.Render("(no changes)")
 	}
-	if len(lines) > visible {
-		lines = lines[:visible]
+
+	// Top: file list. Reserve 1 line per file, capped so we always leave
+	// at least half the pane for diff content.
+	maxList := len(snap.Files)
+	if maxList > height/2 {
+		maxList = height / 2
 	}
-	return header + strings.Join(lines, "\n")
+	if maxList < 1 {
+		maxList = 1
+	}
+	listLines := make([]string, 0, maxList)
+	for i, f := range snap.Files {
+		if i >= maxList {
+			listLines = append(listLines, dim.Render(fmt.Sprintf("  …and %d more", len(snap.Files)-maxList)))
+			break
+		}
+		mark := "[ ]"
+		if f.Keep {
+			mark = awaitTag.Render("[✓]")
+		} else {
+			mark = dim.Render("[ ]")
+		}
+		row := fmt.Sprintf("%s %s", mark, f.Path)
+		if i == snap.Cursor {
+			row = rowFocus.Render("▎ " + row)
+		} else {
+			row = "  " + row
+		}
+		listLines = append(listLines, row)
+	}
+
+	separator := dim.Render(strings.Repeat("─", 40))
+
+	// Bottom: diff content of the selected file, cropped to remaining
+	// rows.
+	contentBudget := height - len(listLines) - 3
+	if contentBudget < 1 {
+		contentBudget = 1
+	}
+	contentLines := strings.Split(strings.TrimRight(snap.Files[snap.Cursor].Content, "\n"), "\n")
+	if len(contentLines) > contentBudget {
+		contentLines = contentLines[:contentBudget]
+	}
+
+	return strings.Join(append(append([]string{header}, listLines...), append([]string{separator}, contentLines...)...), "\n")
 }
 
 func (w Workspace) renderStatus() string {
