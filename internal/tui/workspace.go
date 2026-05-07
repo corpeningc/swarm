@@ -24,6 +24,9 @@ const (
 	ModeIdle Mode = iota
 	ModeNewSession
 	ModePicker
+	// ModeAttached forwards every keystroke to the focused session's agent.
+	// Detach with Ctrl+Q.
+	ModeAttached
 )
 
 // AgentFactory returns a fresh adapter per session. Injected so tests and
@@ -130,6 +133,12 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return w, nil
 	case sessionDoneMsg:
 		w.deps.Registry.SetStatus(m.ID, session.StatusComplete)
+		// If we were attached to the session that just exited, drop back
+		// to idle so the user can choose a new focus.
+		if w.mode == ModeAttached && w.focused == m.ID {
+			w.mode = ModeIdle
+			w.setToast("session " + m.ID + " ended")
+		}
 		return w, nil
 	case spawnErrorMsg:
 		w.setToast(m.Err)
@@ -148,6 +157,8 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			w.picker, cmd = w.picker.Update(key)
 			return w, cmd
+		case ModeAttached:
+			return w.handleAttachedKey(key)
 		}
 	}
 
@@ -167,6 +178,37 @@ func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		w.advanceFocus(+1)
 	case "k", "up":
 		w.advanceFocus(-1)
+	case "enter":
+		if w.focused != "" {
+			if _, ok := w.deps.Registry.Get(w.focused); ok {
+				w.mode = ModeAttached
+			}
+		}
+	}
+	return w, nil
+}
+
+func (w Workspace) handleAttachedKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if k.Type == tea.KeyCtrlQ {
+		w.mode = ModeIdle
+		return w, nil
+	}
+	bytes := encodeKey(k)
+	if len(bytes) == 0 {
+		return w, nil
+	}
+	if w.focused == "" {
+		w.mode = ModeIdle
+		return w, nil
+	}
+	h, ok := w.deps.Registry.Get(w.focused)
+	if !ok {
+		w.mode = ModeIdle
+		return w, nil
+	}
+	if err := h.Agent.Send(string(bytes)); err != nil {
+		w.setToast("session ended: " + err.Error())
+		w.mode = ModeIdle
 	}
 	return w, nil
 }
@@ -282,10 +324,11 @@ var (
 	border    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63"))
 	dim       = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	statusBar = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("237")).Padding(0, 1)
-	rowFocus  = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
-	rowDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
-	repoTag   = lipgloss.NewStyle().Foreground(lipgloss.Color("147"))
-	toastBox  = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Padding(0, 1)
+	rowFocus   = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
+	rowDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+	repoTag    = lipgloss.NewStyle().Foreground(lipgloss.Color("147"))
+	toastBox   = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Padding(0, 1)
+	attachTag  = lipgloss.NewStyle().Foreground(lipgloss.Color("16")).Background(lipgloss.Color("82")).Bold(true).Padding(0, 1)
 )
 
 func (w Workspace) View() string {
@@ -345,7 +388,7 @@ func (w Workspace) renderMain(_, height int) string {
 	if w.focused == "" {
 		return "Swarm v0.0.1-dev\n\n" +
 			dim.Render("welcome. press n to spawn a session.\n\n"+
-				"q quit · n new · j/k navigate")
+				"q quit · n new · j/k navigate · enter attach")
 	}
 	term, ok := w.terminals[w.focused]
 	if !ok {
@@ -360,12 +403,16 @@ func (w Workspace) renderMain(_, height int) string {
 }
 
 func (w Workspace) renderStatus() string {
+	var head string
+	if w.mode == ModeAttached {
+		head = attachTag.Render("ATTACHED ⏎ ctrl+q to detach") + "  "
+	}
 	parts := []string{fmt.Sprintf("%d sessions", w.deps.Registry.Len())}
 	if w.focused != "" {
 		parts = append(parts, "focus="+w.focused)
 	}
 	parts = append(parts, fmt.Sprintf("%dx%d", w.width, w.height))
-	left := strings.Join(parts, " · ")
+	left := head + strings.Join(parts, " · ")
 	if w.toast != "" && time.Now().Before(w.toastUntil) {
 		return left + "  " + toastBox.Render("⚠ "+w.toast)
 	}

@@ -79,7 +79,9 @@ func TestSend(t *testing.T) {
 	}
 	defer a.Kill()
 
-	if err := a.Send("ping-marker"); err != nil {
+	// Trailing newline triggers cat's line buffer flush. Send no longer
+	// auto-appends one — callers control line endings.
+	if err := a.Send("ping-marker\n"); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 

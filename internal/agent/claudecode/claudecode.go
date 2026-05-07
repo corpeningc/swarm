@@ -108,18 +108,16 @@ func (a *Adapter) Resize(cols, rows int) error {
 	return pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 }
 
-// Send writes input to the agent's stdin (the PTY master). Adds a trailing
-// newline if absent — Claude Code's TUI submits on Enter, and callers
-// typically pass logical messages, not partial lines.
+// Send writes input verbatim to the agent's PTY master. No transformations
+// — callers are responsible for line endings and any escape encoding. This
+// keeps Send symmetric with raw terminal input so attach mode can forward
+// keystrokes as bytes.
 func (a *Adapter) Send(input string) error {
 	a.mu.Lock()
 	ptmx := a.ptmx
 	a.mu.Unlock()
 	if ptmx == nil {
 		return fmt.Errorf("claudecode: not spawned")
-	}
-	if len(input) == 0 || input[len(input)-1] != '\n' {
-		input += "\n"
 	}
 	_, err := io.WriteString(ptmx, input)
 	return err
