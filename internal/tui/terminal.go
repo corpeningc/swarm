@@ -21,6 +21,10 @@ import (
 // the emulator can't honor the request anyway. Real fix is upstream.
 var privateCSIPattern = regexp.MustCompile("\x1b\\[[<>=][0-9;]*[a-zA-Z]")
 
+// sgrPattern matches an SGR ("set graphics rendition") sequence:
+// CSI <params> m where params are digits and semicolons.
+var sgrPattern = regexp.MustCompile(`\x1b\[([0-9;]*)m`)
+
 // SessionTerminal is the per-session virtual terminal. Bytes from the agent's
 // PTY get fed in via Feed; the screen state is read out via Render and shown
 // in the focused pane. Built on github.com/micro-editor/terminal — chosen
@@ -53,15 +57,172 @@ func NewSessionTerminal(cols, rows int) *SessionTerminal {
 
 // Feed parses bytes from the agent into the virtual terminal. Despite the
 // underlying API name, VT.Write doesn't write to a PTY — it parses input
-// into screen state. We strip private-marker CSI sequences (`<`, `>`, `=`)
-// before feeding because the emulator misdispatches them.
+// into screen state.
+//
+// Two pre-processing passes before the emulator sees the bytes:
+//   - Strip private-marker CSI (<, >, =) — emulator misdispatches them.
+//   - Downsample 24-bit RGB SGR (38;2;R;G;B / 48;2;R;G;B) to nearest
+//     256-color (38;5;N / 48;5;N). Color type in micro-editor/terminal
+//     is uint16, so 24-bit isn't representable; without this, the RGB
+//     params leak through as separate SGR codes and corrupt state.
 func (t *SessionTerminal) Feed(b []byte) {
 	if len(b) == 0 {
 		return
 	}
 	b = privateCSIPattern.ReplaceAll(b, nil)
+	b = downsampleTrueColor(b)
 	_, _ = t.vt.Write(b)
 }
+
+// downsampleTrueColor walks every SGR sequence and rewrites any
+// 38;2;R;G;B / 48;2;R;G;B triples to their nearest 38;5;N / 48;5;N
+// approximation. Other params pass through. Compound sequences like
+// "1;38;2;R;G;B;3" are handled (each param replaced in place).
+func downsampleTrueColor(b []byte) []byte {
+	return sgrPattern.ReplaceAllFunc(b, func(match []byte) []byte {
+		// match looks like "\x1b[<params>m"; extract params.
+		// sgrPattern guarantees the prefix and suffix.
+		params := match[2 : len(match)-1]
+		if !bytes.Contains(params, []byte("2")) {
+			return match // no possible truecolor triple
+		}
+		parts := splitParams(params)
+		out := parts[:0:len(parts)]
+		for i := 0; i < len(parts); i++ {
+			p := parts[i]
+			// Detect 38;2;R;G;B or 48;2;R;G;B.
+			if (p == "38" || p == "48") && i+4 < len(parts) && parts[i+1] == "2" {
+				r, errR := atoi(parts[i+2])
+				g, errG := atoi(parts[i+3])
+				bl, errB := atoi(parts[i+4])
+				if errR == nil && errG == nil && errB == nil {
+					n := rgbTo256(r, g, bl)
+					out = append(out, p, "5", itoa(n))
+					i += 4
+					continue
+				}
+			}
+			out = append(out, p)
+		}
+		return []byte("\x1b[" + joinSemis(out) + "m")
+	})
+}
+
+// rgbTo256 maps an 8-bit RGB triple to the closest xterm 256-color index.
+// 0–15 are reserved for ANSI; we draw from the 6×6×6 cube (16–231) and
+// the 24-step grayscale ramp (232–255).
+func rgbTo256(r, g, b int) int {
+	// Grayscale path: when R≈G≈B and not at the extremes, the ramp is
+	// closer than the cube.
+	if abs(r-g) < 8 && abs(g-b) < 8 {
+		// Map average 0..255 to 0..23 grayscale.
+		avg := (r + g + b) / 3
+		if avg < 8 {
+			return 16 // black, also covers DefaultFG fallback
+		}
+		if avg > 248 {
+			return 231
+		}
+		return 232 + (avg-8)/10
+	}
+	// 6x6x6 cube. The xterm cube uses non-linear stops at 0, 95, 135,
+	// 175, 215, 255. Quantize each channel to the nearest stop.
+	return 16 + 36*cube6(r) + 6*cube6(g) + cube6(b)
+}
+
+func cube6(v int) int {
+	stops := [6]int{0, 95, 135, 175, 215, 255}
+	best, bestD := 0, 1 << 30
+	for i, s := range stops {
+		d := v - s
+		if d < 0 {
+			d = -d
+		}
+		if d < bestD {
+			best, bestD = i, d
+		}
+	}
+	return best
+}
+
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+// Tiny helpers — avoid pulling in strconv per-byte.
+func atoi(s string) (int, error) {
+	n := 0
+	if len(s) == 0 {
+		return 0, errEmpty
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, errBadDigit
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, nil
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [4]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}
+
+func splitParams(b []byte) []string {
+	if len(b) == 0 {
+		return []string{""}
+	}
+	parts := []string{}
+	last := 0
+	for i, c := range b {
+		if c == ';' {
+			parts = append(parts, string(b[last:i]))
+			last = i + 1
+		}
+	}
+	parts = append(parts, string(b[last:]))
+	return parts
+}
+
+func joinSemis(parts []string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	n := len(parts) - 1
+	for _, p := range parts {
+		n += len(p)
+	}
+	out := make([]byte, 0, n)
+	for i, p := range parts {
+		if i > 0 {
+			out = append(out, ';')
+		}
+		out = append(out, p...)
+	}
+	return string(out)
+}
+
+var (
+	errEmpty    = parseErr("empty")
+	errBadDigit = parseErr("bad digit")
+)
+
+type parseErr string
+
+func (e parseErr) Error() string { return string(e) }
 
 // Resize updates the virtual terminal dimensions. The agent's PTY should be
 // resized to match — see Workspace.resizeAllSessions.

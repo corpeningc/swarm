@@ -95,6 +95,74 @@ func TestSessionTerminal_KittyKeyboardCSIIgnored(t *testing.T) {
 // motivated swapping emulators: enter alt screen, draw, exit alt screen,
 // the original main-screen content should be visible again. vt10x failed
 // this; micro-editor/terminal must pass it.
+func TestRGBTo256_GrayMaps(t *testing.T) {
+	cases := []struct {
+		r, g, b, want int
+	}{
+		{0, 0, 0, 16},        // black
+		{255, 255, 255, 231}, // white
+		{128, 128, 128, 244}, // mid-gray ramp
+	}
+	for _, c := range cases {
+		if got := rgbTo256(c.r, c.g, c.b); got != c.want {
+			t.Errorf("rgbTo256(%d,%d,%d) = %d, want %d", c.r, c.g, c.b, got, c.want)
+		}
+	}
+}
+
+func TestRGBTo256_Cube(t *testing.T) {
+	// Pure red, green, blue land on cube corners.
+	if got := rgbTo256(255, 0, 0); got != 16+36*5 {
+		t.Errorf("pure red = %d, want %d", got, 16+36*5)
+	}
+	if got := rgbTo256(0, 255, 0); got != 16+6*5 {
+		t.Errorf("pure green = %d, want %d", got, 16+6*5)
+	}
+	if got := rgbTo256(0, 0, 255); got != 16+5 {
+		t.Errorf("pure blue = %d, want %d", got, 16+5)
+	}
+}
+
+func TestDownsampleTrueColor_RewritesRGB(t *testing.T) {
+	in := []byte("\x1b[38;2;215;119;87mhello\x1b[0m")
+	out := downsampleTrueColor(in)
+	got := string(out)
+	if !strings.Contains(got, "38;5;") {
+		t.Errorf("expected downsampled fg; got %q", got)
+	}
+	if strings.Contains(got, "38;2;") {
+		t.Errorf("truecolor sequence leaked through; got %q", got)
+	}
+	if !strings.Contains(got, "hello") {
+		t.Errorf("payload lost; got %q", got)
+	}
+}
+
+func TestDownsampleTrueColor_HandlesCompound(t *testing.T) {
+	// Bold + RGB foreground + italic in one SGR.
+	in := []byte("\x1b[1;38;2;200;200;200;3mtext\x1b[0m")
+	out := downsampleTrueColor(in)
+	got := string(out)
+	if strings.Contains(got, "38;2;") {
+		t.Errorf("truecolor not rewritten in compound SGR; got %q", got)
+	}
+	if !strings.Contains(got, "1;") || !strings.Contains(got, ";3m") {
+		t.Errorf("non-RGB params not preserved; got %q", got)
+	}
+}
+
+func TestDownsampleTrueColor_Background(t *testing.T) {
+	in := []byte("\x1b[48;2;30;30;30mbg\x1b[0m")
+	out := downsampleTrueColor(in)
+	got := string(out)
+	if !strings.Contains(got, "48;5;") {
+		t.Errorf("bg not downsampled; got %q", got)
+	}
+	if strings.Contains(got, "48;2;") {
+		t.Errorf("bg truecolor leaked; got %q", got)
+	}
+}
+
 func TestSessionTerminal_AltScreenSurvivesSwap(t *testing.T) {
 	st := NewSessionTerminal(40, 5)
 	// Paint on the main screen first.
