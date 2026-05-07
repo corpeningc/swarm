@@ -4,6 +4,10 @@
 // worktree directory, sends the initial prompt as a positional argument so
 // Claude Code starts the conversation with the user's first turn, and exposes
 // bidirectional IO via Send / Output for follow-up turns.
+//
+// Built on github.com/aymanbagabas/go-pty for cross-platform support
+// (Unix PTY + Windows ConPTY) — the substrate that lets Swarm run on
+// Windows without tmux.
 package claudecode
 
 import (
@@ -11,12 +15,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/creack/pty"
+	"github.com/aymanbagabas/go-pty"
 
 	"github.com/calebcorpening/swarm/internal/agent"
 )
@@ -31,7 +34,7 @@ const (
 	readChunkSize = 4096
 
 	// killGracePeriod is how long Kill waits for SIGINT to take effect before
-	// escalating to SIGKILL + ptmx.Close.
+	// escalating to SIGKILL + pty.Close.
 	killGracePeriod = 2 * time.Second
 )
 
@@ -43,8 +46,8 @@ type Adapter struct {
 	binary string
 
 	mu      sync.Mutex
-	cmd     *exec.Cmd
-	ptmx    *os.File
+	cmd     *pty.Cmd
+	pt      pty.Pty
 	events  chan agent.Event
 	done    chan struct{} // closed when readLoop exits
 	killed  atomic.Bool
@@ -72,50 +75,58 @@ func (a *Adapter) Spawn(ctx context.Context, opts agent.SpawnOpts) error {
 		return fmt.Errorf("claudecode: already spawned")
 	}
 
-	cmd := exec.CommandContext(ctx, a.binary, buildArgs(opts)...)
+	pt, err := pty.New()
+	if err != nil {
+		return fmt.Errorf("claudecode: pty.New: %w", err)
+	}
+
+	cmd := pt.CommandContext(ctx, a.binary, buildArgs(opts)...)
 	cmd.Dir = opts.Cwd
 	cmd.Env = mergeEnv(opts.Env)
 
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		return fmt.Errorf("claudecode: pty.Start %s: %w", a.binary, err)
+	if err := cmd.Start(); err != nil {
+		_ = pt.Close()
+		return fmt.Errorf("claudecode: start %s: %w", a.binary, err)
 	}
 
 	var dump *os.File
 	if opts.DumpPath != "" {
 		dump, err = os.OpenFile(opts.DumpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 		if err != nil {
-			_ = ptmx.Close()
-			_ = cmd.Process.Kill()
+			_ = pt.Close()
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
 			return fmt.Errorf("claudecode: open dump %s: %w", opts.DumpPath, err)
 		}
 	}
 
 	a.cmd = cmd
-	a.ptmx = ptmx
+	a.pt = pt
 	a.spawned = true
 
-	go a.readLoop(cmd, ptmx, dump)
+	go a.readLoop(cmd, pt, dump)
 	return nil
 }
 
 // Output returns the channel of agent events. Closes when the process exits.
 func (a *Adapter) Output() <-chan agent.Event { return a.events }
 
-// Resize informs the child process of a new terminal size via TIOCSWINSZ.
-// Adapters must be spawned before Resize is meaningful; calls before Spawn
-// return an error so callers don't silently lose their initial size.
+// Resize informs the child process of a new terminal size. On Unix this maps
+// to TIOCSWINSZ on the master fd; on Windows it resizes the ConPTY console
+// buffer. Calls before Spawn return an error so callers don't silently lose
+// their initial size.
 func (a *Adapter) Resize(cols, rows int) error {
 	a.mu.Lock()
-	ptmx := a.ptmx
+	pt := a.pt
 	a.mu.Unlock()
-	if ptmx == nil {
+	if pt == nil {
 		return fmt.Errorf("claudecode: not spawned")
 	}
 	if cols <= 0 || rows <= 0 {
 		return fmt.Errorf("claudecode: invalid size %dx%d", cols, rows)
 	}
-	return pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	return pt.Resize(cols, rows)
 }
 
 // Send writes input verbatim to the agent's PTY master. No transformations
@@ -124,12 +135,12 @@ func (a *Adapter) Resize(cols, rows int) error {
 // keystrokes as bytes.
 func (a *Adapter) Send(input string) error {
 	a.mu.Lock()
-	ptmx := a.ptmx
+	pt := a.pt
 	a.mu.Unlock()
-	if ptmx == nil {
+	if pt == nil {
 		return fmt.Errorf("claudecode: not spawned")
 	}
-	_, err := io.WriteString(ptmx, input)
+	_, err := io.WriteString(pt, input)
 	return err
 }
 
@@ -141,7 +152,7 @@ func (a *Adapter) Kill() error {
 		return nil
 	}
 	a.mu.Lock()
-	cmd, ptmx := a.cmd, a.ptmx
+	cmd, pt := a.cmd, a.pt
 	a.mu.Unlock()
 	if cmd == nil || cmd.Process == nil {
 		return nil
@@ -154,8 +165,8 @@ func (a *Adapter) Kill() error {
 	case <-time.After(killGracePeriod):
 	}
 	_ = cmd.Process.Kill()
-	if ptmx != nil {
-		_ = ptmx.Close()
+	if pt != nil {
+		_ = pt.Close()
 	}
 	<-a.done
 	return nil
@@ -167,7 +178,7 @@ func (a *Adapter) Kill() error {
 //
 // dump, if non-nil, receives every byte read from the PTY before the chunk
 // is forwarded as an event. We close it on exit.
-func (a *Adapter) readLoop(cmd *exec.Cmd, ptmx *os.File, dump *os.File) {
+func (a *Adapter) readLoop(cmd *pty.Cmd, pt pty.Pty, dump *os.File) {
 	defer close(a.done)
 	defer close(a.events)
 	if dump != nil {
@@ -176,7 +187,7 @@ func (a *Adapter) readLoop(cmd *exec.Cmd, ptmx *os.File, dump *os.File) {
 
 	buf := make([]byte, readChunkSize)
 	for {
-		n, err := ptmx.Read(buf)
+		n, err := pt.Read(buf)
 		if n > 0 {
 			if dump != nil {
 				_, _ = dump.Write(buf[:n])
@@ -189,11 +200,10 @@ func (a *Adapter) readLoop(cmd *exec.Cmd, ptmx *os.File, dump *os.File) {
 	}
 
 	exitCode := -1
-	switch err := cmd.Wait().(type) {
-	case nil:
+	if waitErr := cmd.Wait(); waitErr == nil {
 		exitCode = 0
-	case *exec.ExitError:
-		exitCode = err.ExitCode()
+	} else if cmd.ProcessState != nil {
+		exitCode = cmd.ProcessState.ExitCode()
 	}
 	a.events <- agent.Event{Kind: agent.EventDone, ExitCode: exitCode}
 }
