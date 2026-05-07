@@ -199,12 +199,8 @@ func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		w.advanceFocus(-1)
 	case "enter":
 		if w.focused != "" {
-			if h, ok := w.deps.Registry.Get(w.focused); ok {
+			if _, ok := w.deps.Registry.Get(w.focused); ok {
 				w.mode = ModeAttached
-				// Stopgap for emulator/agent state drift: ask the agent
-				// to redraw on attach (Ctrl+L). Keeps the rendered screen
-				// matched to Claude's understanding of the cursor.
-				_ = h.Agent.Send("\x0c")
 			}
 		}
 	}
@@ -214,14 +210,6 @@ func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (w Workspace) handleAttachedKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if k.Type == tea.KeyCtrlQ {
 		w.mode = ModeIdle
-		return w, nil
-	}
-	if k.String() == "f5" {
-		// Manual force-redraw: send Ctrl+L to the focused agent. Hit it
-		// when the rendered TUI looks out of sync with reality.
-		if h, ok := w.deps.Registry.Get(w.focused); ok {
-			_ = h.Agent.Send("\x0c")
-		}
 		return w, nil
 	}
 	bytes := encodeKey(k)
@@ -461,7 +449,7 @@ func (w Workspace) renderMain(_, height int) string {
 func (w Workspace) renderStatus() string {
 	var head string
 	if w.mode == ModeAttached {
-		head = attachTag.Render("ATTACHED · ctrl+q detach · f5 redraw") + "  "
+		head = attachTag.Render("ATTACHED · ctrl+q to detach") + "  "
 	}
 	parts := []string{fmt.Sprintf("%d sessions", w.deps.Registry.Len())}
 	if w.focused != "" {
