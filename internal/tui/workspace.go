@@ -214,6 +214,7 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return w, nil
 	case activityTickMsg:
+		w.checkHooks()
 		w.evaluateAwaitingInput()
 		return w, tickActivity()
 	case sessionDoneMsg:
@@ -234,6 +235,16 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionRemovedMsg:
 		delete(w.terminals, m.ID)
 		delete(w.diffSnapshots, m.ID)
+		// Clean up the per-session hooks dir if we can find which repo
+		// the session lived in. Best-effort: registry lookup races with
+		// the removal we just received, so fall back to default repo.
+		repo := w.deps.DefaultRepo
+		if h, ok := w.deps.Registry.Get(m.ID); ok && h.Worktree != nil {
+			repo = h.Worktree.RepoRoot
+		}
+		if repo != "" {
+			_ = os.RemoveAll(filepath.Join(repo, ".swarm", "hooks", m.ID))
+		}
 		if w.focused == m.ID {
 			// Pick another session if any remain.
 			list := w.deps.Registry.List()
@@ -512,6 +523,28 @@ func (w Workspace) mainPaneSize() (cols, rows int) {
 	return clampMin(mainW-2, 20), clampMin(bodyH-2, 5)
 }
 
+// checkHooks polls each session's marker dir for stop/notify files left
+// by Claude Code's hook system. Their presence is a precise "agent paused
+// for input" signal — much faster than the silence heuristic. We delete
+// the marker after consuming so it represents only the most recent event.
+func (w *Workspace) checkHooks() {
+	for _, h := range w.deps.Registry.List() {
+		if h.Worktree == nil {
+			continue
+		}
+		hooksSession := filepath.Join(h.Worktree.RepoRoot, ".swarm", "hooks", h.Session.ID)
+		for _, event := range []string{"stop", "notify"} {
+			path := filepath.Join(hooksSession, event)
+			if _, err := os.Stat(path); err == nil {
+				_ = os.Remove(path)
+				if h.Session.Status == session.StatusRunning {
+					w.deps.Registry.SetStatus(h.Session.ID, session.StatusAwaitingInput)
+				}
+			}
+		}
+	}
+}
+
 // evaluateAwaitingInput flips every Running session that's been silent
 // past awaitingInputThreshold to AwaitingInput. Sessions in any other
 // status (complete, killed, failed, interrupted, awaiting-input) are
@@ -564,7 +597,16 @@ func (w Workspace) startSession(repo, prompt, name string) tea.Cmd {
 			return spawnErrorMsg{Err: "worktree: " + err.Error()}
 		}
 		a := w.deps.AgentFactory()
-		opts := agent.SpawnOpts{Cwd: wt.Path, Prompt: prompt}
+		// Per-session hooks dir lives next to worktrees under .swarm/.
+		// Already gitignored, gets cleaned on session removal or prune.
+		hooksDir := filepath.Join(repo, ".swarm", "hooks")
+		_ = os.MkdirAll(filepath.Join(hooksDir, id), 0755)
+		opts := agent.SpawnOpts{
+			Cwd:       wt.Path,
+			Prompt:    prompt,
+			SessionID: id,
+			HooksDir:  hooksDir,
+		}
 		if os.Getenv("SWARM_DUMP_PTY") != "" {
 			dumpDir := filepath.Join(config.Home(), "dumps")
 			if err := os.MkdirAll(dumpDir, 0755); err == nil {

@@ -59,6 +59,13 @@ func main() {
 				return fmt.Errorf("declarative mode is planned for v0.2")
 			},
 		},
+		&cobra.Command{
+			Use:    "hook <event> <session-id>",
+			Short:  "Internal: marker target for Claude Code hooks. Touches a file the parent swarm process polls.",
+			Args:   cobra.ExactArgs(2),
+			Hidden: true,
+			RunE:   runHook,
+		},
 	)
 
 	if err := root.Execute(); err != nil {
@@ -120,6 +127,31 @@ func runWorkspace(_ *cobra.Command, _ []string) error {
 	p := tea.NewProgram(ws, tea.WithAltScreen())
 	_, err = p.Run()
 	return err
+}
+
+// runHook is invoked by Claude Code's hook system inside a spawned session.
+// It just touches a marker file whose existence the parent swarm process
+// detects on its activity tick to update the session's status. Reads the
+// hooks directory from SWARM_HOOKS_DIR (set by the adapter when spawning).
+// On any error or missing env we no-op silently — Claude doesn't care, and
+// we don't want a failing hook to interrupt the agent's flow.
+func runHook(_ *cobra.Command, args []string) error {
+	hooksDir := os.Getenv("SWARM_HOOKS_DIR")
+	if hooksDir == "" {
+		return nil
+	}
+	event := args[0]
+	sessionID := args[1]
+	target := filepath.Join(hooksDir, sessionID, event)
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		return nil
+	}
+	f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil
+	}
+	_ = f.Close()
+	return nil
 }
 
 // runPrune walks .swarm/worktrees/ in the enclosing repo and removes every

@@ -12,10 +12,12 @@ package claudecode
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -87,6 +89,12 @@ func (a *Adapter) Spawn(ctx context.Context, opts agent.SpawnOpts) error {
 		return fmt.Errorf("claudecode: %s not found on PATH: %w", a.binary, err)
 	}
 
+	if opts.HooksDir != "" && opts.SessionID != "" {
+		if err := writeClaudeHooks(opts.Cwd, opts.HooksDir, opts.SessionID); err != nil {
+			return fmt.Errorf("claudecode: write hooks settings: %w", err)
+		}
+	}
+
 	pt, err := pty.New()
 	if err != nil {
 		return fmt.Errorf("claudecode: pty.New: %w", err)
@@ -94,7 +102,7 @@ func (a *Adapter) Spawn(ctx context.Context, opts agent.SpawnOpts) error {
 
 	cmd := pt.CommandContext(ctx, binPath, buildArgs(opts)...)
 	cmd.Dir = opts.Cwd
-	cmd.Env = mergeEnv(opts.Env)
+	cmd.Env = mergeEnv(opts.Env, opts.HooksDir)
 
 	if err := cmd.Start(); err != nil {
 		_ = pt.Close()
@@ -242,13 +250,67 @@ func buildArgs(opts agent.SpawnOpts) []string {
 // our virtual terminal can actually emulate. Bubbletea may have set TERM to
 // something exotic in the parent process; the agent should see plain
 // xterm-256color so it doesn't try alt-screen quirks the emulator misses.
-func mergeEnv(extra map[string]string) []string {
+//
+// hooksDir, when non-empty, is exposed as SWARM_HOOKS_DIR so the swarm
+// hook subcommand (run by Claude's hook system) can find where to drop
+// marker files.
+func mergeEnv(extra map[string]string, hooksDir string) []string {
 	base := os.Environ()
 	if _, hasTerm := extra["TERM"]; !hasTerm {
 		base = append(base, "TERM=xterm-256color")
+	}
+	if hooksDir != "" {
+		base = append(base, "SWARM_HOOKS_DIR="+hooksDir)
 	}
 	for k, v := range extra {
 		base = append(base, k+"="+v)
 	}
 	return base
+}
+
+// writeClaudeHooks drops a .claude/settings.local.json into the worktree
+// that wires Claude's Stop and Notification events to a hidden `swarm hook`
+// subcommand. Each event invocation lands a marker file in <hooksDir>/<id>/
+// that the parent swarm process polls to update session status without
+// waiting on the silence heuristic.
+//
+// We intentionally write to settings.local.json rather than settings.json:
+// it's claude's "personal-overrides" slot, gitignored by convention, and
+// has highest precedence so our hooks don't need to merge with whatever
+// the user's repo already declares.
+func writeClaudeHooks(worktree, hooksDir, sessionID string) error {
+	swarmBin, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	mkHook := func(event string) []map[string]any {
+		return []map[string]any{
+			{
+				"matcher": "",
+				"hooks": []map[string]any{
+					{
+						"type": "command",
+						// Args are quoted at the JSON level; the shell
+						// claude invokes will split them.
+						"command": fmt.Sprintf("%q hook %s %s", swarmBin, event, sessionID),
+					},
+				},
+			},
+		}
+	}
+	cfg := map[string]any{
+		"hooks": map[string]any{
+			"Stop":         mkHook("stop"),
+			"Notification": mkHook("notify"),
+		},
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(worktree, ".claude")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "settings.local.json"), data, 0644)
 }

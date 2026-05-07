@@ -37,6 +37,17 @@ type SpawnOpts struct {
 	// reproducers for emulator-divergence debugging — set via the
 	// SWARM_DUMP_PTY env var, not normally part of user config.
 	DumpPath string
+
+	// SessionID identifies the session in any per-session config the
+	// adapter writes (e.g. Claude hooks). Adapters that don't use it
+	// ignore the field.
+	SessionID string
+
+	// HooksDir, if non-empty, tells the adapter where the parent swarm
+	// process expects hook marker files to land. The adapter wires this
+	// into per-session agent config (e.g. Claude's .claude/settings.local
+	// .json) and into SWARM_HOOKS_DIR for the spawned process to inherit.
+	HooksDir string
 }
 
 type Agent interface {
