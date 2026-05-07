@@ -58,3 +58,39 @@ func TestSessionTerminal_TinySizeClamped(t *testing.T) {
 		t.Errorf("clamped terminal produced empty render")
 	}
 }
+
+func TestSessionTerminal_AltScreenStripped(t *testing.T) {
+	st := NewSessionTerminal(40, 5)
+	// Sequence Claude actually emits on launch: enter alt screen, render
+	// content, exit alt. With the filter, the content paints on main and
+	// Render shows it.
+	st.Feed([]byte("\x1b[?1049hHello from alt\x1b[?1049l"))
+	got := st.Render()
+	if !strings.Contains(got, "Hello from alt") {
+		t.Errorf("alt-screen content lost; got %q", got)
+	}
+	if strings.Contains(got, "1049") {
+		t.Errorf("escape sequence digits leaked through; got %q", got)
+	}
+}
+
+func TestSessionTerminal_AltScreenAllVariants(t *testing.T) {
+	cases := []string{
+		"\x1b[?47h",
+		"\x1b[?47l",
+		"\x1b[?1047h",
+		"\x1b[?1047l",
+		"\x1b[?1048h",
+		"\x1b[?1048l",
+		"\x1b[?1049h",
+		"\x1b[?1049l",
+	}
+	for _, code := range cases {
+		st := NewSessionTerminal(40, 3)
+		st.Feed([]byte(code + "marker"))
+		got := st.Render()
+		if !strings.Contains(got, "marker") {
+			t.Errorf("filter dropped content for %q; got %q", code, got)
+		}
+	}
+}
