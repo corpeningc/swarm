@@ -11,6 +11,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
 
 	"github.com/calebcorpening/swarm/internal/agent"
@@ -104,6 +106,12 @@ func runWorkspace(_ *cobra.Command, _ []string) error {
 		AgentFactory:  func() agent.Agent { return claudecode.New("") },
 		PickerStartIn: pickerStart,
 	}
+
+	// Force lipgloss to preserve embedded ANSI codes from our virtual
+	// terminal rendering. Without this, lipgloss downgrades or strips
+	// the SGR sequences we emit per cell, and the agent's UI shows up
+	// monochrome inside the focused pane.
+	lipgloss.SetColorProfile(termenv.TrueColor)
 
 	ws := tui.NewWorkspace(deps)
 	if len(restored) > 0 {
