@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -43,10 +46,7 @@ func main() {
 		&cobra.Command{
 			Use:   "prune",
 			Short: "Remove orphaned worktrees and stale session metadata.",
-			RunE: func(*cobra.Command, []string) error {
-				fmt.Println("prune: not implemented yet")
-				return nil
-			},
+			RunE:  runPrune,
 		},
 		&cobra.Command{
 			Use:   "run [tasks.yaml]",
@@ -101,4 +101,62 @@ func runWorkspace(_ *cobra.Command, _ []string) error {
 	p := tea.NewProgram(tui.NewWorkspace(deps), tea.WithAltScreen())
 	_, err = p.Run()
 	return err
+}
+
+// runPrune walks .swarm/worktrees/ in the enclosing repo and removes every
+// session-style directory it finds. Falls back to RemoveAll when git refuses
+// (orphan dir not registered as a worktree). Sweeps git's internal refs at
+// the end with `git worktree prune`.
+func runPrune(_ *cobra.Command, _ []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	repo, err := worktree.FindRepoRoot(ctx, cwd)
+	if err != nil {
+		return fmt.Errorf("swarm prune must run inside a git repo: %w", err)
+	}
+
+	swarmDir := worktree.SwarmWorktreesDir(repo)
+	entries, err := os.ReadDir(swarmDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		fmt.Println("nothing to prune (.swarm/worktrees does not exist)")
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	g := worktree.NewGitManager()
+	cleaned, failed := 0, 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		path := filepath.Join(swarmDir, entry.Name())
+		err := g.Destroy(ctx, &worktree.Worktree{ID: entry.Name(), Path: path, RepoRoot: repo})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  failed: %s: %v\n", entry.Name(), err)
+			failed++
+			continue
+		}
+		fmt.Printf("  removed %s\n", entry.Name())
+		cleaned++
+	}
+
+	// Sweep git's internal worktree refs even if everything we removed was
+	// already orphaned at the FS level.
+	_ = exec.CommandContext(ctx, "git", "-C", repo, "worktree", "prune").Run()
+
+	switch {
+	case cleaned == 0 && failed == 0:
+		fmt.Println("nothing to prune")
+	case failed == 0:
+		fmt.Printf("pruned %d worktree(s)\n", cleaned)
+	default:
+		fmt.Printf("pruned %d worktree(s); %d failed\n", cleaned, failed)
+	}
+	return nil
 }

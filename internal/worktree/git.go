@@ -2,11 +2,18 @@ package worktree
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 )
+
+// ErrWorktreePathExists is returned by Create when the target path already
+// has something on disk — typically an orphan from a prior swarm run that
+// crashed or was killed without `swarm prune`. errors.Is detects it.
+var ErrWorktreePathExists = errors.New("worktree path already exists")
 
 // GitManager implements Manager by shelling out to git and gh.
 type GitManager struct{}
@@ -31,6 +38,10 @@ func resolvePath(p string) string {
 func (g *GitManager) Create(ctx context.Context, repoRoot, baseRef, id string) (*Worktree, error) {
 	repoRoot = resolvePath(repoRoot)
 	path := filepath.Join(SwarmWorktreesDir(repoRoot), id)
+	if _, err := os.Stat(path); err == nil {
+		return nil, fmt.Errorf("%w at %s — run `swarm prune` to clean orphans",
+			ErrWorktreePathExists, path)
+	}
 	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot,
 		"worktree", "add", "--detach", path, baseRef).CombinedOutput()
 	if err != nil {
@@ -44,6 +55,12 @@ func (g *GitManager) Destroy(ctx context.Context, w *Worktree) error {
 	out, err := exec.CommandContext(ctx, "git", "-C", w.RepoRoot,
 		"worktree", "remove", "--force", w.Path).CombinedOutput()
 	if err != nil {
+		// Git may refuse if the worktree was never registered (orphaned
+		// directory). Fall back to removing the directory directly so
+		// `swarm prune` can clean up after a crashed run.
+		if rmErr := os.RemoveAll(w.Path); rmErr == nil {
+			return nil
+		}
 		return fmt.Errorf("git worktree remove %s: %w: %s",
 			w.Path, err, strings.TrimSpace(string(out)))
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -169,7 +170,7 @@ func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch k.String() {
 	case "q", "ctrl+c":
 		w.quitting = true
-		return w, tea.Quit
+		return w, w.shutdownAndQuit()
 	case "n":
 		w.modal = NewSessionModalFor(w.deps.DefaultRepo)
 		w.mode = ModeNewSession
@@ -302,6 +303,24 @@ func (w Workspace) startSession(repo, prompt, name string) tea.Cmd {
 		}
 		w.deps.Registry.Add(h)
 		return sessionSpawnedMsg{ID: id}
+	}
+}
+
+// shutdownAndQuit kills every active agent in parallel, then emits QuitMsg
+// so Bubbletea exits. Worktrees stay on disk per spec — accept/discard or
+// `swarm prune` are the only paths that destroy them.
+func (w Workspace) shutdownAndQuit() tea.Cmd {
+	return func() tea.Msg {
+		var wg sync.WaitGroup
+		for _, h := range w.deps.Registry.List() {
+			wg.Add(1)
+			go func(a agent.Agent) {
+				defer wg.Done()
+				_ = a.Kill()
+			}(h.Agent)
+		}
+		wg.Wait()
+		return tea.QuitMsg{}
 	}
 }
 
