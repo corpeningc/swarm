@@ -92,6 +92,22 @@ func (a *Adapter) Spawn(ctx context.Context, opts agent.SpawnOpts) error {
 // Output returns the channel of agent events. Closes when the process exits.
 func (a *Adapter) Output() <-chan agent.Event { return a.events }
 
+// Resize informs the child process of a new terminal size via TIOCSWINSZ.
+// Adapters must be spawned before Resize is meaningful; calls before Spawn
+// return an error so callers don't silently lose their initial size.
+func (a *Adapter) Resize(cols, rows int) error {
+	a.mu.Lock()
+	ptmx := a.ptmx
+	a.mu.Unlock()
+	if ptmx == nil {
+		return fmt.Errorf("claudecode: not spawned")
+	}
+	if cols <= 0 || rows <= 0 {
+		return fmt.Errorf("claudecode: invalid size %dx%d", cols, rows)
+	}
+	return pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+}
+
 // Send writes input to the agent's stdin (the PTY master). Adds a trailing
 // newline if absent — Claude Code's TUI submits on Enter, and callers
 // typically pass logical messages, not partial lines.

@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -49,9 +48,10 @@ type Workspace struct {
 	modal  NewSessionModal
 	picker RepoPicker
 
-	// outputs accumulates text per session. Keyed by session ID.
-	outputs map[string]*strings.Builder
-	focused string
+	// terminals is the per-session virtual terminal that interprets the
+	// agent's PTY output. Keyed by session ID.
+	terminals map[string]*SessionTerminal
+	focused   string
 
 	toast      string
 	toastUntil time.Time
@@ -60,8 +60,8 @@ type Workspace struct {
 
 func NewWorkspace(deps WorkspaceDeps) Workspace {
 	return Workspace{
-		deps:    deps,
-		outputs: make(map[string]*strings.Builder),
+		deps:      deps,
+		terminals: make(map[string]*SessionTerminal),
 	}
 }
 
@@ -80,6 +80,7 @@ type spawnErrorMsg struct{ Err string }
 func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if sz, ok := msg.(tea.WindowSizeMsg); ok {
 		w.width, w.height = sz.Width, sz.Height
+		w.resizeAllSessions()
 		var c1, c2 tea.Cmd
 		w.modal, c1 = w.modal.Update(sz)
 		w.picker, c2 = w.picker.Update(sz)
@@ -113,9 +114,11 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		w.mode = ModeNewSession
 		return w, nil
 	case sessionSpawnedMsg:
-		w.outputs[m.ID] = &strings.Builder{}
+		cols, rows := w.mainPaneSize()
+		w.terminals[m.ID] = NewSessionTerminal(cols, rows)
 		w.focused = m.ID
 		if h, ok := w.deps.Registry.Get(m.ID); ok {
+			_ = h.Agent.Resize(cols, rows)
 			return w, waitForEvent(m.ID, h.Agent.Output())
 		}
 		return w, nil
@@ -185,14 +188,38 @@ func (w *Workspace) advanceFocus(delta int) {
 }
 
 func (w *Workspace) applyEvent(m sessionEventMsg) {
-	if buf, ok := w.outputs[m.ID]; ok {
-		switch m.Event.Kind {
-		case agent.EventOutput:
-			buf.WriteString(m.Event.Text)
-		case agent.EventError:
-			if m.Event.Err != nil {
-				buf.WriteString("\n[error] " + m.Event.Err.Error() + "\n")
-			}
+	term, ok := w.terminals[m.ID]
+	if !ok {
+		return
+	}
+	switch m.Event.Kind {
+	case agent.EventOutput:
+		term.Feed([]byte(m.Event.Text))
+	case agent.EventError:
+		if m.Event.Err != nil {
+			term.Feed([]byte("\r\n[error] " + m.Event.Err.Error() + "\r\n"))
+		}
+	}
+}
+
+// mainPaneSize returns the interior dimensions of the main pane (the area
+// inside the border). The virtual terminal and the agent's PTY are sized to
+// this so the agent's layout matches what the user actually sees.
+func (w Workspace) mainPaneSize() (cols, rows int) {
+	const sidebarW = 30
+	mainW := w.width - sidebarW - 4
+	bodyH := w.height - 3
+	return clampMin(mainW-2, 20), clampMin(bodyH-2, 5)
+}
+
+// resizeAllSessions resizes both the virtual terminal and the agent's PTY
+// for every active session whenever the window size changes.
+func (w *Workspace) resizeAllSessions() {
+	cols, rows := w.mainPaneSize()
+	for id, term := range w.terminals {
+		term.Resize(cols, rows)
+		if h, ok := w.deps.Registry.Get(id); ok {
+			_ = h.Agent.Resize(cols, rows)
 		}
 	}
 }
@@ -261,13 +288,6 @@ var (
 	toastBox  = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Padding(0, 1)
 )
 
-// ansiPattern is a coarse strip for SGR/CSI escape sequences so the agent's
-// raw TTY output renders without garbage. Cursor moves and clears are not
-// preserved — proper rendering will come with a vt10x integration later.
-var ansiPattern = regexp.MustCompile("\x1b\\[[0-9;?]*[a-zA-Z]")
-
-func stripANSI(s string) string { return ansiPattern.ReplaceAllString(s, "") }
-
 func (w Workspace) View() string {
 	if w.quitting {
 		return ""
@@ -327,12 +347,12 @@ func (w Workspace) renderMain(_, height int) string {
 			dim.Render("welcome. press n to spawn a session.\n\n"+
 				"q quit · n new · j/k navigate")
 	}
-	buf, ok := w.outputs[w.focused]
-	if !ok || buf.Len() == 0 {
+	term, ok := w.terminals[w.focused]
+	if !ok {
 		return dim.Render("waiting for output…")
 	}
-	text := stripANSI(buf.String())
-	lines := strings.Split(text, "\n")
+	out := term.Render()
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if len(lines) > height {
 		lines = lines[len(lines)-height:]
 	}

@@ -37,6 +37,11 @@ type Agent interface {
 	Spawn(ctx context.Context, opts SpawnOpts) error
 	Output() <-chan Event
 	Send(input string) error
+	// Resize tells the agent's underlying terminal what dimensions to render
+	// for. Sessions are rendered into a virtual terminal of the same size,
+	// so this keeps the agent's layout matched to what the user actually
+	// sees in the focused pane.
+	Resize(cols, rows int) error
 	Kill() error
 }
 
