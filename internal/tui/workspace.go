@@ -4,6 +4,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/calebcorpening/swarm/internal/agent"
+	"github.com/calebcorpening/swarm/internal/config"
 	"github.com/calebcorpening/swarm/internal/session"
 	"github.com/calebcorpening/swarm/internal/worktree"
 )
@@ -315,7 +317,14 @@ func (w Workspace) startSession(repo, prompt, name string) tea.Cmd {
 			return spawnErrorMsg{Err: "worktree: " + err.Error()}
 		}
 		a := w.deps.AgentFactory()
-		if err := a.Spawn(context.Background(), agent.SpawnOpts{Cwd: wt.Path, Prompt: prompt}); err != nil {
+		opts := agent.SpawnOpts{Cwd: wt.Path, Prompt: prompt}
+		if os.Getenv("SWARM_DUMP_PTY") != "" {
+			dumpDir := filepath.Join(config.Home(), "dumps")
+			if err := os.MkdirAll(dumpDir, 0755); err == nil {
+				opts.DumpPath = filepath.Join(dumpDir, id+".log")
+			}
+		}
+		if err := a.Spawn(context.Background(), opts); err != nil {
 			_ = w.deps.Git.Destroy(context.Background(), wt)
 			return spawnErrorMsg{Err: "spawn: " + err.Error()}
 		}

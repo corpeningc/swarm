@@ -31,6 +31,12 @@ type SpawnOpts struct {
 
 	// Env adds or overrides environment variables for the child process.
 	Env map[string]string
+
+	// DumpPath, if non-empty, makes the adapter mirror every byte it reads
+	// from the agent's PTY to this file (raw, pre-parse). Used to capture
+	// reproducers for emulator-divergence debugging — set via the
+	// SWARM_DUMP_PTY env var, not normally part of user config.
+	DumpPath string
 }
 
 type Agent interface {

@@ -81,11 +81,21 @@ func (a *Adapter) Spawn(ctx context.Context, opts agent.SpawnOpts) error {
 		return fmt.Errorf("claudecode: pty.Start %s: %w", a.binary, err)
 	}
 
+	var dump *os.File
+	if opts.DumpPath != "" {
+		dump, err = os.OpenFile(opts.DumpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			_ = ptmx.Close()
+			_ = cmd.Process.Kill()
+			return fmt.Errorf("claudecode: open dump %s: %w", opts.DumpPath, err)
+		}
+	}
+
 	a.cmd = cmd
 	a.ptmx = ptmx
 	a.spawned = true
 
-	go a.readLoop(cmd, ptmx)
+	go a.readLoop(cmd, ptmx, dump)
 	return nil
 }
 
@@ -154,14 +164,23 @@ func (a *Adapter) Kill() error {
 // readLoop streams the PTY into the events channel, then waits on the child
 // to harvest its exit code, then closes both the events channel and the done
 // signal. This goroutine owns cmd.Wait — Kill must not call it.
-func (a *Adapter) readLoop(cmd *exec.Cmd, ptmx *os.File) {
+//
+// dump, if non-nil, receives every byte read from the PTY before the chunk
+// is forwarded as an event. We close it on exit.
+func (a *Adapter) readLoop(cmd *exec.Cmd, ptmx *os.File, dump *os.File) {
 	defer close(a.done)
 	defer close(a.events)
+	if dump != nil {
+		defer dump.Close()
+	}
 
 	buf := make([]byte, readChunkSize)
 	for {
 		n, err := ptmx.Read(buf)
 		if n > 0 {
+			if dump != nil {
+				_, _ = dump.Write(buf[:n])
+			}
 			a.events <- agent.Event{Kind: agent.EventOutput, Text: string(buf[:n])}
 		}
 		if err != nil {
