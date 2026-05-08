@@ -1,13 +1,15 @@
-// Package memory persists project-level knowledge that compounds across
+// Package memory persists project-level conventions that compound across
 // swarm sessions in a repo. The file lives at <repo>/.swarm/memory.md
-// (gitignored), is plain Markdown the user can edit by hand, and gets
-// auto-prepended to every new session's first turn so the agent inherits
-// what previous sessions in the repo learned.
+// (gitignored), is plain Markdown the user (or claude, by request)
+// curates over time, and gets auto-prepended to every new session's first
+// turn so the agent inherits the repo's habits — naming conventions, test
+// patterns, architectural decisions — without the user re-explaining.
 //
-// Each accepted session appends a small entry (label, prompt, timestamp);
-// the user is encouraged to edit those entries into actual learnings —
-// "fix" facts, conventions, gotchas — over time. The agent reads whatever
-// is there.
+// Memory is intentionally NOT a session log. Per-task narratives ("we
+// migrated X on date Y") would pile up as noise the next time you spawn
+// a session in an unrelated area of the codebase. memory.md is for
+// stable knowledge, edited by hand or by asking the agent to update it
+// when a real pattern emerges.
 package memory
 
 import (
@@ -15,7 +17,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // File returns the path to a repo's memory file.
@@ -77,10 +78,3 @@ func PromptWithMemory(repoRoot, prompt string) string {
 	)
 }
 
-// AcceptedEntry is the auto-generated stub appended to memory.md when a
-// session is accepted. Users are expected to edit these into real
-// learnings over time.
-func AcceptedEntry(label, prompt string) string {
-	when := time.Now().Format("2006-01-02 15:04")
-	return fmt.Sprintf("## %s · %s\n\n**prompt:** %s\n\n*Edit this entry with what was learned, conventions discovered, or gotchas to remember.*", label, when, prompt)
-}

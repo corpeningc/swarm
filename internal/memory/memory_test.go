@@ -68,13 +68,4 @@ func TestPromptWithMemory_WrapsExisting(t *testing.T) {
 	}
 }
 
-func TestAcceptedEntry_Format(t *testing.T) {
-	got := AcceptedEntry("auth-fix", "migrate JWT to opaque tokens")
-	if !strings.HasPrefix(got, "## auth-fix") {
-		t.Errorf("missing label header; got %q", got)
-	}
-	if !strings.Contains(got, "migrate JWT") {
-		t.Errorf("missing prompt; got %q", got)
-	}
-}
 

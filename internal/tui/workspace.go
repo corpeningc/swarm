@@ -857,7 +857,6 @@ func (w Workspace) acceptSessionSelective(h *session.Handle, discardFiles []stri
 		if err := w.deps.Git.AcceptSelective(ctx, h.Worktree, discardFiles); err != nil {
 			return spawnErrorMsg{Err: "accept: " + err.Error()}
 		}
-		_ = memory.Append(h.Session.RepoRoot, memory.AcceptedEntry(h.Session.Label(), h.Session.Prompt))
 		w.deps.Registry.Remove(h.Session.ID)
 		return sessionRemovedMsg{ID: h.Session.ID}
 	}
@@ -877,7 +876,6 @@ func (w Workspace) acceptSession(h *session.Handle) tea.Cmd {
 		if err := w.deps.Git.Accept(ctx, h.Worktree); err != nil {
 			return spawnErrorMsg{Err: "accept: " + err.Error()}
 		}
-		_ = memory.Append(h.Session.RepoRoot, memory.AcceptedEntry(h.Session.Label(), h.Session.Prompt))
 		w.deps.Registry.Remove(h.Session.ID)
 		return sessionRemovedMsg{ID: h.Session.ID}
 	}
