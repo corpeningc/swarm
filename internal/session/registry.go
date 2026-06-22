@@ -83,6 +83,7 @@ func LoadOrNewRegistry(statePath string) (*Registry, []*Handle, error) {
 				ID:       s.ID,
 				Path:     s.Worktree,
 				BaseRef:  s.BaseRef,
+				Branch:   s.Branch,
 				RepoRoot: s.RepoRoot,
 			},
 			// Agent stays nil — process is gone.

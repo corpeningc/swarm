@@ -7,8 +7,68 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
 )
+
+// setupHookTimeout bounds how long a fresh-worktree setup script may run.
+// Generous because the common case is dependency installation (npm/go/pip).
+const setupHookTimeout = 10 * time.Minute
+
+// RunSetupHook runs the repo's per-worktree setup script in worktreePath if
+// one exists, so freshly-created worktrees come pre-installed/configured
+// before the agent starts (node_modules and other gitignored artifacts don't
+// come across with `git worktree add`). Looks for .swarm/setup.ps1 on Windows
+// and .swarm/setup.sh elsewhere. No-op (nil) when no script is present.
+func RunSetupHook(repoRoot, worktreePath string) error {
+	name, interp := setupScript(repoRoot)
+	if name == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), setupHookTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, interp[0], append(interp[1:], name)...)
+	cmd.Dir = worktreePath
+	cmd.Env = append(os.Environ(),
+		"SWARM_REPO="+repoRoot,
+		"SWARM_WORKTREE="+worktreePath,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("setup hook: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// setupScript returns the absolute path to the repo's setup script and the
+// interpreter argv to run it, or "" if no script exists / no interpreter is
+// available.
+func setupScript(repoRoot string) (string, []string) {
+	dir := filepath.Join(repoRoot, ".swarm")
+	if runtime.GOOS == "windows" {
+		if p := filepath.Join(dir, "setup.ps1"); fileExists(p) {
+			for _, sh := range []string{"pwsh", "powershell"} {
+				if bin, err := exec.LookPath(sh); err == nil {
+					return p, []string{bin, "-NoProfile", "-File"}
+				}
+			}
+		}
+	}
+	if p := filepath.Join(dir, "setup.sh"); fileExists(p) {
+		if bin, err := exec.LookPath("bash"); err == nil {
+			return p, []string{bin}
+		}
+		if bin, err := exec.LookPath("sh"); err == nil {
+			return p, []string{bin}
+		}
+	}
+	return "", nil
+}
+
+func fileExists(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && !info.IsDir()
+}
 
 // ErrDirtyTree is returned by EnsureCleanTree when the repo has uncommitted
 // changes. The caller may proceed if the user passes --force.

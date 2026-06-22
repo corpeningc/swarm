@@ -17,9 +17,11 @@ import (
 // to drive its mode transitions; the modal itself is otherwise self-contained.
 type (
 	NewSessionSubmittedMsg struct {
-		Repo   string
-		Prompt string
-		Name   string // user-supplied; slugified by the workspace before use
+		Repo      string
+		Prompt    string
+		Name      string // user-supplied; slugified by the workspace before use
+		Agent     string // chosen agent backend (claude, codex, aider)
+		EnableMCP bool   // load the user's global MCP servers in this session
 	}
 	NewSessionCanceledMsg struct{}
 	BrowseRequestedMsg    struct{}
@@ -41,13 +43,23 @@ type NewSessionModal struct {
 	focusIdx int
 	width    int
 
+	// enableMCP loads the user's global MCP servers in the spawned session.
+	// Off by default — booting them is the main startup cost — toggled with
+	// ctrl+e.
+	enableMCP bool
+
 	// existingWorktrees lists the slug names of worktrees already on disk
 	// in the chosen repo. Refreshed when SetRepo is called.
 	existingWorktrees []string
 	listCursor        int
+
+	// agents is the selectable agent backends; agentIdx is the current
+	// choice (ctrl+a cycles). agents[0] is the default.
+	agents   []string
+	agentIdx int
 }
 
-func NewSessionModalFor(repo string) NewSessionModal {
+func NewSessionModalFor(repo string, agents []string) NewSessionModal {
 	name := textinput.New()
 	name.Placeholder = "name (slug → worktree dir; existing names reattach)"
 	name.CharLimit = 40
@@ -59,11 +71,15 @@ func NewSessionModalFor(repo string) NewSessionModal {
 	prompt.CharLimit = 0
 	prompt.Width = 60
 
+	if len(agents) == 0 {
+		agents = []string{"claude"}
+	}
 	m := NewSessionModal{
 		repo:     repo,
 		name:     name,
 		prompt:   prompt,
 		focusIdx: fieldName,
+		agents:   agents,
 	}
 	m.refreshWorktrees()
 	return m
@@ -93,6 +109,14 @@ func (m *NewSessionModal) refreshWorktrees() {
 	sort.Strings(m.existingWorktrees)
 }
 
+// agentName is the currently-selected agent backend.
+func (m NewSessionModal) agentName() string {
+	if len(m.agents) == 0 {
+		return ""
+	}
+	return m.agents[m.agentIdx]
+}
+
 func (m NewSessionModal) Init() tea.Cmd { return textinput.Blink }
 
 func (m NewSessionModal) Update(msg tea.Msg) (NewSessionModal, tea.Cmd) {
@@ -107,6 +131,14 @@ func (m NewSessionModal) Update(msg tea.Msg) (NewSessionModal, tea.Cmd) {
 			return m, func() tea.Msg { return NewSessionCanceledMsg{} }
 		case "ctrl+b":
 			return m, func() tea.Msg { return BrowseRequestedMsg{} }
+		case "ctrl+e":
+			m.enableMCP = !m.enableMCP
+			return m, nil
+		case "ctrl+a":
+			if len(m.agents) > 0 {
+				m.agentIdx = (m.agentIdx + 1) % len(m.agents)
+			}
+			return m, nil
 		case "tab":
 			m.cycleFocus(+1)
 			return m, nil
@@ -145,9 +177,11 @@ func (m NewSessionModal) Update(msg tea.Msg) (NewSessionModal, tea.Cmd) {
 			}
 			return m, func() tea.Msg {
 				return NewSessionSubmittedMsg{
-					Repo:   m.repo,
-					Prompt: p,
-					Name:   strings.TrimSpace(m.name.Value()),
+					Repo:      m.repo,
+					Prompt:    p,
+					Name:      strings.TrimSpace(m.name.Value()),
+					Agent:     m.agentName(),
+					EnableMCP: m.enableMCP,
 				}
 			}
 		}
@@ -240,10 +274,25 @@ func (m NewSessionModal) View() string {
 		}
 	}
 
+	mcpState := modalHint.Render("off (fast)")
+	if m.enableMCP {
+		mcpState = listFocusRow.Render("on")
+	}
+	agentLine := ""
+	if len(m.agents) > 1 {
+		agentLine = modalLabel.Render("agent ") + listFocusRow.Render(m.agentName()) + modalHint.Render("  ctrl+a switch")
+	}
 	parts = append(parts,
 		"",
 		modalLabel.Render("prompt"),
 		m.prompt.View(),
+		"",
+		modalLabel.Render("mcp   ")+mcpState+modalHint.Render("  ctrl+e toggle"),
+	)
+	if agentLine != "" {
+		parts = append(parts, agentLine)
+	}
+	parts = append(parts,
 		"",
 		modalHint.Render("tab next field · enter submit · esc cancel"),
 	)

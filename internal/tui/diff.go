@@ -16,8 +16,9 @@ type DiffFile struct {
 // DiffSnapshot is the parsed result of `git diff` for one session, plus
 // the user's selection state and currently-highlighted file.
 type DiffSnapshot struct {
-	Files  []*DiffFile
-	Cursor int
+	Files   []*DiffFile
+	Cursor  int
+	ScrollY int // first visible line of the selected file's diff content
 }
 
 // SelectedFiles returns paths the user wants to keep.

@@ -2,7 +2,6 @@ package worktree
 
 import (
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -149,122 +148,6 @@ func TestEnsureCleanTree(t *testing.T) {
 	os.WriteFile(filepath.Join(repo, "x"), []byte("y"), 0644)
 	if err := EnsureCleanTree(context.Background(), repo); err != ErrDirtyTree {
 		t.Errorf("dirty repo not flagged: %v", err)
-	}
-}
-
-// TestGitManager_AcceptFastForward exercises the happy path: worktree adds
-// a commit, Accept fast-forward-merges it into the main repo's current
-// branch and destroys the worktree.
-func TestGitManager_AcceptFastForward(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not on PATH")
-	}
-	repo := t.TempDir()
-	ctx := context.Background()
-
-	mustRun(t, repo, "git", "init", "-b", "main")
-	mustRun(t, repo, "git", "config", "user.email", "t@t")
-	mustRun(t, repo, "git", "config", "user.name", "t")
-	os.WriteFile(filepath.Join(repo, "README"), []byte("hi"), 0644)
-	mustRun(t, repo, "git", "add", "-A")
-	mustRun(t, repo, "git", "commit", "-m", "init")
-	if err := EnsureGitignore(repo); err != nil {
-		t.Fatal(err)
-	}
-	mustRun(t, repo, "git", "add", "-A")
-	mustRun(t, repo, "git", "commit", "-m", "ignore swarm")
-
-	g := NewGitManager()
-	w, err := g.Create(ctx, repo, "main", "sess-accept")
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	// Add a commit inside the worktree.
-	os.WriteFile(filepath.Join(w.Path, "feature.txt"), []byte("done"), 0644)
-	mustRun(t, w.Path, "git", "add", "-A")
-	mustRun(t, w.Path, "git", "commit", "-m", "feature")
-
-	if err := g.Accept(ctx, w); err != nil {
-		t.Fatalf("Accept: %v", err)
-	}
-
-	// Worktree should be gone; main repo should have the file.
-	if _, err := os.Stat(w.Path); !os.IsNotExist(err) {
-		t.Errorf("worktree still exists after accept: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(repo, "feature.txt")); err != nil {
-		t.Errorf("accepted commit didn't reach main repo: %v", err)
-	}
-}
-
-// TestGitManager_AcceptRefusesDirty: main repo has uncommitted changes.
-func TestGitManager_AcceptRefusesDirty(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not on PATH")
-	}
-	repo := t.TempDir()
-	ctx := context.Background()
-
-	mustRun(t, repo, "git", "init", "-b", "main")
-	mustRun(t, repo, "git", "config", "user.email", "t@t")
-	mustRun(t, repo, "git", "config", "user.name", "t")
-	os.WriteFile(filepath.Join(repo, "README"), []byte("hi"), 0644)
-	mustRun(t, repo, "git", "add", "-A")
-	mustRun(t, repo, "git", "commit", "-m", "init")
-
-	g := NewGitManager()
-	w, err := g.Create(ctx, repo, "main", "sess-dirty")
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	defer g.Destroy(ctx, w)
-
-	// Dirty the main repo.
-	os.WriteFile(filepath.Join(repo, "README"), []byte("changed"), 0644)
-
-	if err := g.Accept(ctx, w); err == nil {
-		t.Errorf("Accept on dirty repo should have errored")
-	} else if !errors.Is(err, ErrDirtyTree) {
-		t.Errorf("Accept error not ErrDirtyTree: %v", err)
-	}
-	if _, err := os.Stat(w.Path); err != nil {
-		t.Errorf("worktree destroyed despite refused accept: %v", err)
-	}
-}
-
-// TestGitManager_AcceptNothingToMerge: worktree never advanced past base.
-// Should just destroy the worktree and return nil.
-func TestGitManager_AcceptNothingToMerge(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not on PATH")
-	}
-	repo := t.TempDir()
-	ctx := context.Background()
-
-	mustRun(t, repo, "git", "init", "-b", "main")
-	mustRun(t, repo, "git", "config", "user.email", "t@t")
-	mustRun(t, repo, "git", "config", "user.name", "t")
-	os.WriteFile(filepath.Join(repo, "README"), []byte("hi"), 0644)
-	mustRun(t, repo, "git", "add", "-A")
-	mustRun(t, repo, "git", "commit", "-m", "init")
-	if err := EnsureGitignore(repo); err != nil {
-		t.Fatal(err)
-	}
-	mustRun(t, repo, "git", "add", "-A")
-	mustRun(t, repo, "git", "commit", "-m", "ignore swarm")
-
-	g := NewGitManager()
-	w, err := g.Create(ctx, repo, "main", "sess-noop")
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	if err := g.Accept(ctx, w); err != nil {
-		t.Errorf("Accept on no-change worktree: %v", err)
-	}
-	if _, err := os.Stat(w.Path); !os.IsNotExist(err) {
-		t.Errorf("worktree still exists after no-op accept: %v", err)
 	}
 }
 

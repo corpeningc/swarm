@@ -37,6 +37,15 @@ func TestBuildArgs(t *testing.T) {
 			},
 			[]string{"--dangerously-skip-permissions", "--allowedTools", "Bash", "go"},
 		},
+		{
+			"strict mcp + append system prompt",
+			agent.SpawnOpts{
+				StrictMCP:          true,
+				AppendSystemPrompt: "stay put",
+				Prompt:             "go",
+			},
+			[]string{"--strict-mcp-config", "--append-system-prompt", "stay put", "go"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -1,6 +1,40 @@
 package tui
 
-import tea "github.com/charmbracelet/bubbletea"
+import (
+	"fmt"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+// encodeWheel builds the terminal mouse sequence for a scroll-wheel event at
+// 1-based cell (x, y), in SGR (1006) form when sgr is true, else legacy X10.
+// Wheel-up is button code 64, wheel-down 65. Only used for programs that have
+// enabled mouse reporting (see SessionTerminal.MouseMode).
+func encodeWheel(up bool, sgr bool, x, y int) []byte {
+	cb := 65 // wheel down
+	if up {
+		cb = 64
+	}
+	if x < 1 {
+		x = 1
+	}
+	if y < 1 {
+		y = 1
+	}
+	if sgr {
+		// ESC [ < cb ; x ; y M
+		return fmt.Appendf(nil, "\x1b[<%d;%d;%dM", cb, x, y)
+	}
+	// Legacy X10: ESC [ M, then three bytes each offset by 32.
+	clamp := func(v int) byte {
+		v += 32
+		if v > 255 {
+			v = 255
+		}
+		return byte(v)
+	}
+	return []byte{0x1b, '[', 'M', clamp(cb), clamp(x), clamp(y)}
+}
 
 // encodeKey translates a Bubbletea KeyMsg into the bytes a TTY-attached
 // program would have read had the user typed the key directly. Used by

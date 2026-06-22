@@ -7,7 +7,8 @@ import "context"
 type Worktree struct {
 	ID       string
 	Path     string
-	BaseRef  string
+	BaseRef  string // the commit-ish the worktree branched from (diff base)
+	Branch   string // the branch checked out in the worktree (swarm/<id>)
 	RepoRoot string
 }
 
@@ -16,13 +17,4 @@ type Manager interface {
 	Destroy(ctx context.Context, w *Worktree) error
 	List(ctx context.Context, repoRoot string) ([]*Worktree, error)
 	ResolvePR(ctx context.Context, repoRoot string, prNumber int) (string, error)
-	// Accept fast-forward-merges the worktree's HEAD into the main repo's
-	// current branch and then destroys the worktree. Returns an error
-	// (without destroying the worktree) if the main repo has uncommitted
-	// changes or the merge isn't fast-forward-able.
-	Accept(ctx context.Context, w *Worktree) error
-	// AcceptSelective reverts the listed files in the worktree to their
-	// base-ref state, then runs Accept on what's left. Used by the diff
-	// view's per-file keep/discard.
-	AcceptSelective(ctx context.Context, w *Worktree, discardFiles []string) error
 }

@@ -44,6 +44,7 @@ type Session struct {
 	Name      string // optional user label; Label() falls back to ID when empty
 	RepoRoot  string
 	BaseRef   string
+	Branch    string // git branch checked out in the worktree (swarm/<id>)
 	Worktree  string
 	AgentName string
 	Prompt    string

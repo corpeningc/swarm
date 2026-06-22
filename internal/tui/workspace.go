@@ -4,10 +4,13 @@ package tui
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,8 +37,10 @@ const (
 	// Detach with Ctrl+Q.
 	ModeAttached
 	// ModeConfirm shows a yes/no prompt for destructive operations
-	// (discard, accept). y confirms, n/esc cancels.
+	// (discard). y confirms, n/esc cancels.
 	ModeConfirm
+	// ModeMemory shows the project-memory editor for a repo.
+	ModeMemory
 )
 
 // ViewMode picks what the main pane renders for the focused session —
@@ -46,6 +51,9 @@ type ViewMode int
 const (
 	ViewLive ViewMode = iota
 	ViewDiff
+	// ViewShell shows an interactive shell running in the session's worktree
+	// — the integration surface for git ops (commit, push, gh pr create).
+	ViewShell
 )
 
 // AgentFactory returns a fresh adapter per session. Injected so tests and
@@ -54,11 +62,28 @@ type AgentFactory func() agent.Agent
 
 // WorkspaceDeps is what cmd/swarm constructs and hands the TUI.
 type WorkspaceDeps struct {
-	Registry      *session.Registry
-	Git           worktree.Manager
-	DefaultRepo   string
-	AgentFactory  AgentFactory
-	PickerStartIn string // initial directory for the repo picker
+	Registry    *session.Registry
+	Git         worktree.Manager
+	DefaultRepo string
+	// AgentFactories maps an agent name (claude, codex, aider) to its
+	// constructor; AgentNames is the display/selection order with [0] as the
+	// default.
+	AgentFactories map[string]AgentFactory
+	AgentNames     []string
+	ShellFactory   AgentFactory // per-session interactive shell for the Shell tab
+	PickerStartIn  string       // initial directory for the repo picker
+}
+
+// agentFactory returns the constructor for the named agent, falling back to
+// the default (AgentNames[0]) when the name is unknown or empty.
+func (d WorkspaceDeps) agentFactory(name string) AgentFactory {
+	if f, ok := d.AgentFactories[name]; ok {
+		return f
+	}
+	if len(d.AgentNames) > 0 {
+		return d.AgentFactories[d.AgentNames[0]]
+	}
+	return nil
 }
 
 type Workspace struct {
@@ -67,13 +92,20 @@ type Workspace struct {
 	width, height int
 	mode          Mode
 
-	modal  NewSessionModal
-	picker RepoPicker
+	modal    NewSessionModal
+	picker   RepoPicker
+	memModal MemoryModal
 
 	// terminals is the per-session virtual terminal that interprets the
 	// agent's PTY output. Keyed by session ID.
 	terminals map[string]*SessionTerminal
 	focused   string
+
+	// shells / shellTerminals hold the lazily-spawned Shell-tab process and
+	// its virtual terminal, keyed by session ID. Spawned on first switch to
+	// the Shell tab; respawnable after the shell exits.
+	shells         map[string]agent.Agent
+	shellTerminals map[string]*SessionTerminal
 
 	// viewMode picks what the main pane shows for the focused session.
 	viewMode ViewMode
@@ -86,6 +118,10 @@ type Workspace struct {
 	// for each session, used to flip running ↔ awaiting-input.
 	lastActivity map[string]time.Time
 
+	// diffStats holds the most-recent +added/-deleted line counts per
+	// session, shown in the sidebar. Refreshed on a slow tick.
+	diffStats map[string]diffStat
+
 	toast      string
 	toastUntil time.Time
 
@@ -94,25 +130,40 @@ type Workspace struct {
 	confirmPrompt string
 	pendingAction func() tea.Cmd
 
+	// attachOnSpawn holds a session ID that should switch to ModeAttached as
+	// soon as its sessionSpawnedMsg arrives — set when Enter resumes a
+	// restored session so the user lands inside it without a second keypress.
+	attachOnSpawn string
+
 	quitting bool
 }
 
 func NewWorkspace(deps WorkspaceDeps) Workspace {
 	return Workspace{
 		deps:          deps,
-		terminals:     make(map[string]*SessionTerminal),
-		diffSnapshots: make(map[string]*DiffSnapshot),
-		lastActivity:  make(map[string]time.Time),
+		terminals:      make(map[string]*SessionTerminal),
+		shells:         make(map[string]agent.Agent),
+		shellTerminals: make(map[string]*SessionTerminal),
+		diffSnapshots:  make(map[string]*DiffSnapshot),
+		lastActivity:   make(map[string]time.Time),
+		diffStats:      make(map[string]diffStat),
 	}
 }
+
+// diffStat is the +added/-deleted line summary for a session's worktree.
+type diffStat struct{ add, del int }
 
 // activityTickInterval is how often we poll for "session idle long enough
 // to flip to awaiting-input".
 const activityTickInterval = 1 * time.Second
 
-// awaitingInputThreshold is how long a running session must be silent
-// before we treat it as waiting on the user.
-const awaitingInputThreshold = 3 * time.Second
+// awaitingInputThreshold is the silence-based FALLBACK for flipping a running
+// session to awaiting-input. The primary, authoritative signal is Claude's
+// Stop hook (see checkHooks), which fires the instant a turn ends. We keep a
+// long silence timeout only to catch agents whose hooks didn't fire — short
+// enough to eventually notice, long enough not to false-flip an agent that's
+// merely thinking mid-turn.
+const awaitingInputThreshold = 25 * time.Second
 
 // activityTickMsg fires on the activityTickInterval to re-evaluate every
 // running session's running ↔ awaiting-input flag.
@@ -124,7 +175,21 @@ func tickActivity() tea.Cmd {
 	})
 }
 
-func (w Workspace) Init() tea.Cmd { return tickActivity() }
+// statsTickInterval is how often we recompute per-session diff stats for the
+// sidebar. Slower than the activity tick — it shells out to git per session,
+// and refreshStats further limits which sessions it touches each tick.
+const statsTickInterval = 4 * time.Second
+
+type statsTickMsg struct{}
+type statsRefreshedMsg struct{ stats map[string]diffStat }
+
+func tickStats() tea.Cmd {
+	return tea.Tick(statsTickInterval, func(time.Time) tea.Msg {
+		return statsTickMsg{}
+	})
+}
+
+func (w Workspace) Init() tea.Cmd { return tea.Batch(tickActivity(), tickStats()) }
 
 // ----- internal messages emitted by the spawn pipeline -----
 
@@ -140,9 +205,14 @@ type spawnErrorMsg struct{ Err string }
 // removing it). Workspace just needs to redraw the sidebar.
 type sessionStatusMsg struct{ ID string }
 
-// sessionRemovedMsg signals that a session is gone — discarded or
-// accepted. Workspace cleans up its terminal map and focus.
-type sessionRemovedMsg struct{ ID string }
+// sessionRemovedMsg signals that a session is gone — discarded. Workspace
+// cleans up its terminal map and focus. Warn, if set, is surfaced as a toast
+// (e.g. the worktree dir couldn't be fully deleted but we removed the session
+// anyway so the user isn't stuck).
+type sessionRemovedMsg struct {
+	ID   string
+	Warn string
+}
 
 // diffRefreshedMsg carries a freshly-parsed diff snapshot for a session.
 type diffRefreshedMsg struct {
@@ -151,20 +221,39 @@ type diffRefreshedMsg struct {
 	Err      string
 }
 
+// shell lifecycle messages, mirroring the agent ones but for the Shell tab's
+// per-session shell process.
+type shellSpawnedMsg struct {
+	ID    string
+	Shell agent.Agent
+}
+type shellEventMsg struct {
+	ID    string
+	Event agent.Event
+}
+type shellDoneMsg struct{ ID string }
+
 func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if sz, ok := msg.(tea.WindowSizeMsg); ok {
 		w.width, w.height = sz.Width, sz.Height
 		w.resizeAllSessions()
-		var c1, c2 tea.Cmd
+		var c1, c2, c3 tea.Cmd
 		w.modal, c1 = w.modal.Update(sz)
 		w.picker, c2 = w.picker.Update(sz)
-		return w, tea.Batch(c1, c2)
+		if w.mode == ModeMemory {
+			w.memModal, c3 = w.memModal.Update(sz)
+		}
+		return w, tea.Batch(c1, c2, c3)
+	}
+
+	if mouse, ok := msg.(tea.MouseMsg); ok {
+		return w.handleMouse(mouse)
 	}
 
 	switch m := msg.(type) {
 	case NewSessionSubmittedMsg:
 		w.mode = ModeIdle
-		return w, w.startSession(m.Repo, m.Prompt, m.Name)
+		return w, w.startSession(m.Repo, m.Prompt, m.Name, m.Agent, m.EnableMCP)
 	case NewSessionCanceledMsg:
 		w.mode = ModeIdle
 		return w, nil
@@ -189,6 +278,13 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case PickerCanceledMsg:
 		w.mode = ModeNewSession
 		return w, nil
+	case MemorySavedMsg:
+		w.mode = ModeIdle
+		w.setToast("memory saved")
+		return w, nil
+	case MemoryCanceledMsg:
+		w.mode = ModeIdle
+		return w, nil
 	case PickerErrorMsg:
 		w.setToast(m.Err)
 		w.mode = ModeNewSession
@@ -198,6 +294,13 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		w.terminals[m.ID] = NewSessionTerminal(cols, rows)
 		w.lastActivity[m.ID] = time.Now()
 		w.focused = m.ID
+		// Auto-attach when this spawn was a resume triggered by Enter on a
+		// restored session.
+		if w.attachOnSpawn == m.ID {
+			w.mode = ModeAttached
+			w.viewMode = ViewLive
+			w.attachOnSpawn = ""
+		}
 		if h, ok := w.deps.Registry.Get(m.ID); ok {
 			_ = h.Agent.Resize(cols, rows)
 			return w, waitForEvent(m.ID, h.Agent.Output())
@@ -216,9 +319,22 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return w, nil
 	case activityTickMsg:
+		before := w.awaitingCount()
 		w.checkHooks()
 		w.evaluateAwaitingInput()
-		return w, tickActivity()
+		cmds := []tea.Cmd{tickActivity(), w.titleCmd()}
+		// Ring once when the awaiting set grows — a session newly needs you.
+		if w.awaitingCount() > before {
+			cmds = append(cmds, bell())
+		}
+		return w, tea.Batch(cmds...)
+	case statsTickMsg:
+		return w, tea.Batch(w.refreshStats(), tickStats())
+	case statsRefreshedMsg:
+		// Merge — refreshStats only recomputes a subset, so keep the cached
+		// stats for sessions it skipped this tick.
+		maps.Copy(w.diffStats, m.stats)
+		return w, nil
 	case sessionDoneMsg:
 		w.deps.Registry.SetStatus(m.ID, session.StatusComplete)
 		// If we were attached to the session that just exited, drop back
@@ -230,12 +346,18 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return w, nil
 	case spawnErrorMsg:
 		w.setToast(m.Err)
+		w.attachOnSpawn = "" // a resume may have failed; don't latch the intent
 		return w, nil
 	case sessionStatusMsg:
 		// No-op other than triggering a redraw via the message round-trip.
 		return w, nil
 	case sessionRemovedMsg:
+		if m.Warn != "" {
+			w.setToast(m.Warn)
+		}
 		delete(w.terminals, m.ID)
+		delete(w.shells, m.ID)
+		delete(w.shellTerminals, m.ID)
 		delete(w.diffSnapshots, m.ID)
 		// Clean up the per-session hooks dir if we can find which repo
 		// the session lived in. Best-effort: registry lookup races with
@@ -255,6 +377,32 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				w.focused = ""
 			}
+		}
+		return w, nil
+	case shellSpawnedMsg:
+		w.shells[m.ID] = m.Shell
+		cols, rows := w.mainPaneSize()
+		w.shellTerminals[m.ID] = NewSessionTerminal(cols, rows)
+		_ = m.Shell.Resize(cols, rows)
+		return w, waitForShellEvent(m.ID, m.Shell.Output())
+	case shellEventMsg:
+		if term, ok := w.shellTerminals[m.ID]; ok {
+			term.Feed([]byte(m.Event.Text))
+		}
+		if sh, ok := w.shells[m.ID]; ok {
+			return w, waitForShellEvent(m.ID, sh.Output())
+		}
+		return w, nil
+	case shellDoneMsg:
+		delete(w.shells, m.ID)
+		delete(w.shellTerminals, m.ID)
+		// If we were attached to this session's shell, drop back to idle so
+		// the next Shell-tab switch spawns a fresh shell.
+		if w.focused == m.ID && w.viewMode == ViewShell {
+			if w.mode == ModeAttached {
+				w.mode = ModeIdle
+			}
+			w.viewMode = ViewLive
 		}
 		return w, nil
 	case diffRefreshedMsg:
@@ -305,6 +453,10 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		w.picker, cmd = w.picker.Update(msg)
 		return w, cmd
+	case ModeMemory:
+		var cmd tea.Cmd
+		w.memModal, cmd = w.memModal.Update(msg)
+		return w, cmd
 	}
 
 	return w, nil
@@ -330,7 +482,7 @@ func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		w.quitting = true
 		return w, w.shutdownAndQuit()
 	case "n":
-		w.modal = NewSessionModalFor(w.deps.DefaultRepo)
+		w.modal = NewSessionModalFor(w.deps.DefaultRepo, w.deps.AgentNames)
 		w.mode = ModeNewSession
 		var sizeCmd tea.Cmd
 		if w.width > 0 && w.height > 0 {
@@ -343,11 +495,22 @@ func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		w.advanceFocus(-1)
 	case "enter":
 		if h, ok := w.focusedHandle(); ok {
-			if h.Agent == nil {
-				w.setToast("session is from a previous run; discard or accept")
-			} else {
+			if w.viewMode == ViewShell {
+				// Attach to the worktree shell — spawn it if the user hit
+				// enter before it came up. Works for restored sessions too,
+				// since the shell only needs the worktree, not a live agent.
 				w.mode = ModeAttached
+				return w, w.ensureShell(h)
 			}
+			if h.Agent == nil {
+				// Restored/interrupted session: relaunch its agent in the
+				// existing worktree (resuming the Claude conversation if we
+				// captured its id) and attach as soon as it's up.
+				w.attachOnSpawn = h.Session.ID
+				w.setToast("resuming " + h.Session.Label() + "…")
+				return w, w.resumeSession(h)
+			}
+			w.mode = ModeAttached
 		}
 	case "x":
 		// Kill is recoverable — agent dies, worktree stays for review or
@@ -369,42 +532,28 @@ func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			w.pendingAction = func() tea.Cmd { return w.discardSession(h) }
 			w.mode = ModeConfirm
 		}
-	case "A", "shift+a":
-		// Accept ff-merges into the main repo's current branch. Bound to
-		// shift+A to avoid accidental triggers from vim muscle memory
-		// (vim's `a` is "append after cursor"). Lowercase `a` is a
-		// no-op in idle mode for the same reason.
-		if h, ok := w.focusedHandle(); ok {
-			id := h.Session.Label()
-			snap := w.diffSnapshots[w.focused]
-			if w.viewMode == ViewDiff && snap != nil && len(snap.Files) > 0 {
-				kept := len(snap.SelectedFiles())
-				total := len(snap.Files)
-				w.confirmPrompt = fmt.Sprintf("accept %s? %d of %d files kept", id, kept, total)
-				w.pendingAction = func() tea.Cmd { return w.acceptSessionSelective(h, snap.DiscardedFiles()) }
-			} else {
-				w.confirmPrompt = "accept " + id + "? merge into current branch"
-				w.pendingAction = func() tea.Cmd { return w.acceptSession(h) }
-			}
-			w.mode = ModeConfirm
+	case "m":
+		// Edit the focused session's repo memory (falls back to default repo).
+		repo := w.deps.DefaultRepo
+		if h, ok := w.focusedHandle(); ok && h.Session.RepoRoot != "" {
+			repo = h.Session.RepoRoot
 		}
+		if repo == "" {
+			w.setToast("no repo to edit memory for")
+			return w, nil
+		}
+		w.memModal = NewMemoryModal(repo)
+		w.mode = ModeMemory
+		var sizeCmd tea.Cmd
+		if w.width > 0 && w.height > 0 {
+			w.memModal, sizeCmd = w.memModal.Update(tea.WindowSizeMsg{Width: w.width, Height: w.height})
+		}
+		return w, tea.Batch(sizeCmd, w.memModal.Init())
 	case "tab":
-		// Tab toggles the main pane between live agent output and the
-		// session's git diff vs its base ref. (D / shift+D kept as
-		// aliases for muscle memory but Tab is the primary binding.)
-		if w.viewMode == ViewDiff {
-			w.viewMode = ViewLive
-		} else if h, ok := w.focusedHandle(); ok {
-			w.viewMode = ViewDiff
-			return w, w.refreshDiff(h)
-		}
-	case "D", "shift+d":
-		if w.viewMode == ViewDiff {
-			w.viewMode = ViewLive
-		} else if h, ok := w.focusedHandle(); ok {
-			w.viewMode = ViewDiff
-			return w, w.refreshDiff(h)
-		}
+		// Tab cycles the main pane: Preview → Diff → Shell → Preview.
+		// Entering Diff refreshes the snapshot; entering Shell spawns the
+		// worktree shell on first use.
+		return w, w.cycleView()
 	case "r":
 		// Refresh the cached diff for the focused session.
 		if w.viewMode == ViewDiff {
@@ -416,10 +565,10 @@ func (w Workspace) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return w, nil
 }
 
-// handleDiffKey is the diff-view-specific keymap. j/k navigate files,
-// space toggles keep/discard for the highlighted file. Returns
-// (model, cmd, handled): handled=false means handleIdleKey should
-// continue with its session-level keymap.
+// handleDiffKey is the diff-view-specific keymap. The diff is read-only
+// review now that integration happens in the Shell tab — j/k just navigate
+// files. Returns (model, cmd, handled): handled=false means handleIdleKey
+// should continue with its session-level keymap.
 func (w Workspace) handleDiffKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	snap := w.diffSnapshots[w.focused]
 	if snap == nil || len(snap.Files) == 0 {
@@ -428,15 +577,75 @@ func (w Workspace) handleDiffKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	switch k.String() {
 	case "j", "down":
 		snap.Cursor = (snap.Cursor + 1) % len(snap.Files)
+		snap.ScrollY = 0 // new file starts at the top
 		return w, nil, true
 	case "k", "up":
 		snap.Cursor = (snap.Cursor - 1 + len(snap.Files)) % len(snap.Files)
+		snap.ScrollY = 0
 		return w, nil, true
-	case " ", "space":
-		snap.Files[snap.Cursor].Keep = !snap.Files[snap.Cursor].Keep
+	case "ctrl+d", "pgdown":
+		snap.ScrollY += 10
+		return w, nil, true
+	case "ctrl+u", "pgup":
+		snap.ScrollY = max(snap.ScrollY-10, 0)
 		return w, nil, true
 	}
 	return w, nil, false
+}
+
+// cycleView advances the main-pane tab: Preview → Diff → Shell → Preview.
+// Returns any Cmd needed to populate the entered view (diff refresh / shell
+// spawn).
+func (w *Workspace) cycleView() tea.Cmd {
+	h, ok := w.focusedHandle()
+	if !ok {
+		return nil
+	}
+	switch w.viewMode {
+	case ViewLive:
+		w.viewMode = ViewDiff
+		return w.refreshDiff(h)
+	case ViewDiff:
+		w.viewMode = ViewShell
+		return w.ensureShell(h)
+	default:
+		w.viewMode = ViewLive
+		return nil
+	}
+}
+
+// ensureShell spawns the worktree shell for a session if one isn't already
+// running. Returns nil when the shell already exists. The spawn runs off the
+// UI goroutine and reports back via shellSpawnedMsg.
+func (w Workspace) ensureShell(h *session.Handle) tea.Cmd {
+	id := h.Session.ID
+	if _, ok := w.shells[id]; ok {
+		return nil
+	}
+	if h.Worktree == nil {
+		return func() tea.Msg { return spawnErrorMsg{Err: "shell: session has no worktree"} }
+	}
+	cwd := h.Worktree.Path
+	factory := w.deps.ShellFactory
+	return func() tea.Msg {
+		sh := factory()
+		if err := sh.Spawn(context.Background(), agent.SpawnOpts{Cwd: cwd}); err != nil {
+			return spawnErrorMsg{Err: "shell: " + err.Error()}
+		}
+		return shellSpawnedMsg{ID: id, Shell: sh}
+	}
+}
+
+// waitForShellEvent is waitForEvent's Shell-tab twin: it streams the shell's
+// PTY output into shellEventMsg, closing into shellDoneMsg on exit.
+func waitForShellEvent(id string, ch <-chan agent.Event) tea.Cmd {
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			return shellDoneMsg{ID: id}
+		}
+		return shellEventMsg{ID: id, Event: ev}
+	}
 }
 
 // focusedHandle returns the registered Handle for the currently focused
@@ -446,6 +655,54 @@ func (w Workspace) focusedHandle() (*session.Handle, bool) {
 		return nil, false
 	}
 	return w.deps.Registry.Get(w.focused)
+}
+
+// handleMouse forwards scroll-wheel events. In the Diff tab it scrolls our
+// own buffer; in Preview/Shell it forwards an xterm wheel sequence to the
+// backing process so it scrolls its own view — but only when that process has
+// enabled mouse reporting, so a bare shell doesn't receive escape-byte
+// garbage. Clicks/motion are ignored (pane-relative coordinate translation is
+// fragile and unnecessary for scrolling). Works whether or not attached.
+func (w Workspace) handleMouse(m tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if w.mode != ModeIdle && w.mode != ModeAttached {
+		return w, nil // modals/pickers don't scroll panes
+	}
+	up := m.Button == tea.MouseButtonWheelUp
+	down := m.Button == tea.MouseButtonWheelDown
+	if (!up && !down) || w.focused == "" {
+		return w, nil
+	}
+
+	if w.viewMode == ViewDiff {
+		if snap := w.diffSnapshots[w.focused]; snap != nil {
+			if up {
+				snap.ScrollY = max(snap.ScrollY-3, 0)
+			} else {
+				snap.ScrollY += 3
+			}
+		}
+		return w, nil
+	}
+
+	var term *SessionTerminal
+	var target agent.Agent
+	if w.viewMode == ViewShell {
+		term, target = w.shellTerminals[w.focused], w.shells[w.focused]
+	} else if h, ok := w.deps.Registry.Get(w.focused); ok {
+		term, target = w.terminals[w.focused], h.Agent
+	}
+	if term == nil || target == nil {
+		return w, nil
+	}
+	enabled, sgr := term.MouseMode()
+	if !enabled {
+		return w, nil
+	}
+	// Translate absolute screen coords into approximate pane-relative cells
+	// (sidebar is 30 wide + border; tab bar + border above). Exactness
+	// doesn't matter for wheel events.
+	_ = target.Send(string(encodeWheel(up, sgr, m.X-32, m.Y-2)))
+	return w, nil
 }
 
 func (w Workspace) handleConfirmKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -481,12 +738,19 @@ func (w Workspace) handleAttachedKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		w.mode = ModeIdle
 		return w, nil
 	}
-	h, ok := w.deps.Registry.Get(w.focused)
-	if !ok {
-		w.mode = ModeIdle
+	// Route to the shell when the Shell tab is active, else to the agent.
+	var target agent.Agent
+	if w.viewMode == ViewShell {
+		target = w.shells[w.focused]
+	} else if h, ok := w.deps.Registry.Get(w.focused); ok {
+		target = h.Agent
+	}
+	if target == nil {
+		// Nothing live to send to (e.g. shell still spawning, or a restored
+		// session with no agent). Stay attached; keystrokes are dropped.
 		return w, nil
 	}
-	if err := h.Agent.Send(string(bytes)); err != nil {
+	if err := target.Send(string(bytes)); err != nil {
 		w.setToast("session ended: " + err.Error())
 		w.mode = ModeIdle
 	}
@@ -494,7 +758,7 @@ func (w Workspace) handleAttachedKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (w *Workspace) advanceFocus(delta int) {
-	list := w.deps.Registry.List()
+	list := w.displayList()
 	if len(list) == 0 {
 		return
 	}
@@ -507,6 +771,51 @@ func (w *Workspace) advanceFocus(delta int) {
 	}
 	idx = (idx + delta + len(list)) % len(list)
 	w.focused = list[idx].Session.ID
+}
+
+// displayList is the registry's sessions in sidebar/navigation order:
+// awaiting-input sessions float to the top so the ones that need the user are
+// always reachable first; the rest keep registry order. Stable so focus
+// doesn't jump around between ticks.
+func (w Workspace) displayList() []*session.Handle {
+	list := w.deps.Registry.List()
+	sort.SliceStable(list, func(i, j int) bool {
+		ai := list[i].Session.Status == session.StatusAwaitingInput
+		aj := list[j].Session.Status == session.StatusAwaitingInput
+		return ai && !aj
+	})
+	return list
+}
+
+// awaitingCount reports how many sessions are waiting on the user — surfaced
+// in the window title and used to decide when to ring the attention bell.
+func (w Workspace) awaitingCount() int {
+	n := 0
+	for _, h := range w.deps.Registry.List() {
+		if h.Session.Status == session.StatusAwaitingInput {
+			n++
+		}
+	}
+	return n
+}
+
+// titleCmd sets the terminal window title to reflect how many sessions need
+// attention, so swarm is useful even when it's not the focused window.
+func (w Workspace) titleCmd() tea.Cmd {
+	if n := w.awaitingCount(); n > 0 {
+		return tea.SetWindowTitle(fmt.Sprintf("swarm — %d awaiting", n))
+	}
+	return tea.SetWindowTitle("swarm")
+}
+
+// bell writes a BEL to the controlling terminal as an attention nudge when a
+// session transitions to awaiting-input. BEL doesn't move the cursor, so it's
+// safe to emit alongside the alt-screen Bubbletea owns.
+func bell() tea.Cmd {
+	return func() tea.Msg {
+		fmt.Fprint(os.Stderr, "\a")
+		return nil
+	}
 }
 
 func (w *Workspace) applyEvent(m sessionEventMsg) {
@@ -641,8 +950,14 @@ func (w *Workspace) resizeAllSessions() {
 	cols, rows := w.mainPaneSize()
 	for id, term := range w.terminals {
 		term.Resize(cols, rows)
-		if h, ok := w.deps.Registry.Get(id); ok {
+		if h, ok := w.deps.Registry.Get(id); ok && h.Agent != nil {
 			_ = h.Agent.Resize(cols, rows)
+		}
+	}
+	for id, term := range w.shellTerminals {
+		term.Resize(cols, rows)
+		if sh, ok := w.shells[id]; ok {
+			_ = sh.Resize(cols, rows)
 		}
 	}
 }
@@ -663,7 +978,13 @@ func (w *Workspace) setToast(s string) {
 // If a worktree already exists at the resolved path we attach the new
 // session to it instead of creating fresh, unless another live session
 // already owns it.
-func (w Workspace) startSession(repo, prompt, name string) tea.Cmd {
+// isolatedWorktreeGuidance is appended to the spawned agent's system prompt
+// so it knows it's already running in a swarm-managed worktree and shouldn't
+// stack another one on top.
+const isolatedWorktreeGuidance = "You are already running inside an isolated git worktree managed by swarm. " +
+	"Work directly in the current directory. Do NOT create git worktrees or use worktree isolation for subagents."
+
+func (w Workspace) startSession(repo, prompt, name, agentName string, enableMCP bool) tea.Cmd {
 	// Refusal check happens here on the UI goroutine so we can read the
 	// registry safely. Same pass also picks up the ClaudeSessionID of any
 	// existing handle for this worktree so we can reattach to the same
@@ -705,6 +1026,7 @@ func (w Workspace) startSession(repo, prompt, name string) tea.Cmd {
 				ID:       dirName,
 				Path:     path,
 				BaseRef:  "HEAD",
+				Branch:   worktree.BranchName(dirName),
 				RepoRoot: repo,
 			}
 		} else {
@@ -712,9 +1034,21 @@ func (w Workspace) startSession(repo, prompt, name string) tea.Cmd {
 			if err != nil {
 				return spawnErrorMsg{Err: "worktree: " + err.Error()}
 			}
+			// Pre-install/configure the fresh worktree (e.g. npm install)
+			// before the agent starts. No-op unless the repo ships a
+			// .swarm/setup.{sh,ps1}. Clean up if it fails so we don't strand
+			// a half-prepared worktree.
+			if setupErr := worktree.RunSetupHook(repo, wt.Path); setupErr != nil {
+				_ = w.deps.Git.Destroy(context.Background(), wt)
+				return spawnErrorMsg{Err: setupErr.Error()}
+			}
 		}
 
-		a := w.deps.AgentFactory()
+		factory := w.deps.agentFactory(agentName)
+		if factory == nil {
+			return spawnErrorMsg{Err: "no agent factory configured"}
+		}
+		a := factory()
 		hooksDir := filepath.Join(repo, ".swarm", "hooks")
 		_ = os.MkdirAll(filepath.Join(hooksDir, dirName), 0755)
 		// Inject project memory only on a fresh conversation. When we're
@@ -725,11 +1059,13 @@ func (w Workspace) startSession(repo, prompt, name string) tea.Cmd {
 			effectivePrompt = memory.PromptWithMemory(repo, prompt)
 		}
 		opts := agent.SpawnOpts{
-			Cwd:       wt.Path,
-			Prompt:    effectivePrompt,
-			SessionID: dirName,
-			HooksDir:  hooksDir,
-			ResumeID:  resumeID,
+			Cwd:                wt.Path,
+			Prompt:             effectivePrompt,
+			SessionID:          dirName,
+			HooksDir:           hooksDir,
+			ResumeID:           resumeID,
+			StrictMCP:          !enableMCP,
+			AppendSystemPrompt: isolatedWorktreeGuidance,
 		}
 		if os.Getenv("SWARM_DUMP_PTY") != "" {
 			dumpDir := filepath.Join(config.Home(), "dumps")
@@ -750,7 +1086,8 @@ func (w Workspace) startSession(repo, prompt, name string) tea.Cmd {
 		h := &session.Handle{
 			Session: &session.Session{
 				ID: dirName, Name: name, RepoRoot: repo, BaseRef: "HEAD",
-				Worktree: wt.Path, AgentName: "claude-code",
+				Branch:   wt.Branch,
+				Worktree: wt.Path, AgentName: agentName,
 				Prompt: prompt, Status: session.StatusRunning,
 				CreatedAt: now, UpdatedAt: now,
 				// Carry the captured resume id forward so it's
@@ -761,6 +1098,59 @@ func (w Workspace) startSession(repo, prompt, name string) tea.Cmd {
 		}
 		w.deps.Registry.Add(h)
 		return sessionSpawnedMsg{ID: dirName}
+	}
+}
+
+// resumeSession relaunches the agent for a restored/interrupted handle in its
+// existing worktree, reusing the same session ID (so the registry replaces the
+// dead handle in place and the sidebar order is preserved). Resumes the Claude
+// conversation when a session id was captured; otherwise just opens the agent
+// in the worktree. Reported back via sessionSpawnedMsg.
+func (w Workspace) resumeSession(h *session.Handle) tea.Cmd {
+	s := h.Session
+	wt := h.Worktree
+	resumeID := s.ClaudeSessionID
+	agentName := s.AgentName
+	repo := s.RepoRoot
+	createdAt := s.CreatedAt
+	name, prompt, baseRef, branch := s.Name, s.Prompt, s.BaseRef, s.Branch
+	id := s.ID
+	factory := w.deps.agentFactory(agentName)
+	return func() tea.Msg {
+		if wt == nil {
+			return spawnErrorMsg{Err: "resume: session has no worktree — discard it"}
+		}
+		if _, err := os.Stat(wt.Path); err != nil {
+			return spawnErrorMsg{Err: "resume: worktree is gone — discard it"}
+		}
+		if factory == nil {
+			return spawnErrorMsg{Err: "resume: no agent factory configured"}
+		}
+		a := factory()
+		hooksDir := filepath.Join(repo, ".swarm", "hooks")
+		_ = os.MkdirAll(filepath.Join(hooksDir, id), 0755)
+		opts := agent.SpawnOpts{
+			Cwd:                wt.Path,
+			SessionID:          id,
+			HooksDir:           hooksDir,
+			ResumeID:           resumeID,
+			StrictMCP:          true,
+			AppendSystemPrompt: isolatedWorktreeGuidance,
+		}
+		if err := a.Spawn(context.Background(), opts); err != nil {
+			return spawnErrorMsg{Err: "resume: " + err.Error()}
+		}
+		now := time.Now()
+		w.deps.Registry.Add(&session.Handle{
+			Session: &session.Session{
+				ID: id, Name: name, RepoRoot: repo, BaseRef: baseRef, Branch: branch,
+				Worktree: wt.Path, AgentName: agentName, Prompt: prompt,
+				Status: session.StatusRunning, CreatedAt: createdAt, UpdatedAt: now,
+				ClaudeSessionID: resumeID,
+			},
+			Worktree: wt, Agent: a,
+		})
+		return sessionSpawnedMsg{ID: id}
 	}
 }
 
@@ -817,6 +1207,70 @@ func (w Workspace) refreshDiff(h *session.Handle) tea.Cmd {
 	}
 }
 
+// refreshStats recomputes the +added/-deleted line counts for every live
+// session off the UI goroutine via `git diff --numstat`. Cheap per session,
+// but we run it on the slow stats tick rather than per render.
+func (w Workspace) refreshStats() tea.Cmd {
+	type item struct{ id, path, base string }
+	var items []item
+	for _, h := range w.deps.Registry.List() {
+		if h.Worktree == nil {
+			continue
+		}
+		// Only recompute sessions whose diff can still change (running /
+		// awaiting), plus any session we don't have a stat for yet. A
+		// finished session's churn is static — compute it once, then skip
+		// it so a long-lived sidebar doesn't shell out to git every tick.
+		_, have := w.diffStats[h.Session.ID]
+		live := h.Session.Status == session.StatusRunning ||
+			h.Session.Status == session.StatusAwaitingInput
+		if have && !live {
+			continue
+		}
+		base := h.Session.BaseRef
+		if base == "" {
+			base = "HEAD"
+		}
+		items = append(items, item{h.Session.ID, h.Worktree.Path, base})
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		stats := make(map[string]diffStat, len(items))
+		for _, it := range items {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			out, err := exec.CommandContext(ctx, "git", "-C", it.path,
+				"diff", "--numstat", it.base).Output()
+			cancel()
+			if err != nil {
+				continue
+			}
+			stats[it.id] = parseNumstat(string(out))
+		}
+		return statsRefreshedMsg{stats: stats}
+	}
+}
+
+// parseNumstat sums the added/deleted columns of `git diff --numstat`. Binary
+// files report "-\t-" and are skipped.
+func parseNumstat(out string) diffStat {
+	var s diffStat
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if a, err := strconv.Atoi(fields[0]); err == nil {
+			s.add += a
+		}
+		if d, err := strconv.Atoi(fields[1]); err == nil {
+			s.del += d
+		}
+	}
+	return s
+}
+
 // killSession terminates the focused session's agent. The worktree stays
 // on disk so the user can review or later discard.
 func (w Workspace) killSession(h *session.Handle) tea.Cmd {
@@ -828,74 +1282,54 @@ func (w Workspace) killSession(h *session.Handle) tea.Cmd {
 	}
 }
 
-// discardSession kills the agent (if running), destroys the worktree, and
-// removes the session from the registry. Irreversible.
+// discardSession kills the agent and shell (if running), destroys the
+// worktree and its branch, and removes the session from the registry.
+// Irreversible. The shell is captured on the UI goroutine to avoid racing
+// the shells map.
 func (w Workspace) discardSession(h *session.Handle) tea.Cmd {
+	sh := w.shells[h.Session.ID]
 	return func() tea.Msg {
 		if h.Agent != nil {
 			_ = h.Agent.Kill()
+		}
+		if sh != nil {
+			_ = sh.Kill()
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := w.deps.Git.Destroy(ctx, h.Worktree); err != nil {
-			return spawnErrorMsg{Err: "discard: " + err.Error()}
+		var warn string
+		if h.Worktree != nil {
+			if err := w.deps.Git.Destroy(ctx, h.Worktree); err != nil {
+				// Don't strand the session in the list — the user asked for
+				// it gone. Remove it anyway; a leftover worktree dir is a
+				// `swarm prune` concern, not a reason to get stuck.
+				warn = "discarded; worktree cleanup failed (run `swarm prune`): " + err.Error()
+			}
 		}
 		w.deps.Registry.Remove(h.Session.ID)
-		return sessionRemovedMsg{ID: h.Session.ID}
+		return sessionRemovedMsg{ID: h.Session.ID, Warn: warn}
 	}
 }
 
-// acceptSessionSelective is the file-level cousin of acceptSession.
-// discardFiles are reverted in the worktree before commit-and-merge.
-func (w Workspace) acceptSessionSelective(h *session.Handle, discardFiles []string) tea.Cmd {
-	return func() tea.Msg {
-		if h.Agent != nil {
-			_ = h.Agent.Kill()
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		if err := w.deps.Git.AcceptSelective(ctx, h.Worktree, discardFiles); err != nil {
-			return spawnErrorMsg{Err: "accept: " + err.Error()}
-		}
-		w.deps.Registry.Remove(h.Session.ID)
-		return sessionRemovedMsg{ID: h.Session.ID}
-	}
-}
-
-// acceptSession ff-merges the worktree's HEAD into the main repo's current
-// branch via worktree.Manager.Accept (which also destroys the worktree on
-// success), then removes the session from the registry. The agent is killed
-// first so its grip on PTY/files doesn't block the merge.
-func (w Workspace) acceptSession(h *session.Handle) tea.Cmd {
-	return func() tea.Msg {
-		if h.Agent != nil {
-			_ = h.Agent.Kill()
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		if err := w.deps.Git.Accept(ctx, h.Worktree); err != nil {
-			return spawnErrorMsg{Err: "accept: " + err.Error()}
-		}
-		w.deps.Registry.Remove(h.Session.ID)
-		return sessionRemovedMsg{ID: h.Session.ID}
-	}
-}
-
-// shutdownAndQuit kills every active agent in parallel, then emits QuitMsg
-// so Bubbletea exits. Worktrees stay on disk per spec — accept/discard or
+// shutdownAndQuit kills every active agent and shell in parallel, then emits
+// QuitMsg so Bubbletea exits. Worktrees stay on disk per spec — discard or
 // `swarm prune` are the only paths that destroy them.
 func (w Workspace) shutdownAndQuit() tea.Cmd {
 	return func() tea.Msg {
 		var wg sync.WaitGroup
+		kill := func(a agent.Agent) {
+			defer wg.Done()
+			_ = a.Kill()
+		}
 		for _, h := range w.deps.Registry.List() {
-			if h.Agent == nil {
-				continue
+			if h.Agent != nil {
+				wg.Add(1)
+				go kill(h.Agent)
 			}
+		}
+		for _, sh := range w.shells {
 			wg.Add(1)
-			go func(a agent.Agent) {
-				defer wg.Done()
-				_ = a.Kill()
-			}(h.Agent)
+			go kill(sh)
 		}
 		wg.Wait()
 		return tea.QuitMsg{}
@@ -917,23 +1351,42 @@ func waitForEvent(id string, ch <-chan agent.Event) tea.Cmd {
 
 // ----- view -----
 
-var (
-	border    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63"))
-	dim       = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	statusBar = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("237")).Padding(0, 1)
-	rowFocus   = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
-	rowDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
-	repoTag    = lipgloss.NewStyle().Foreground(lipgloss.Color("147"))
-	awaitTag   = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
-	runTag     = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
-	hintTag    = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Italic(true)
+// workspaceBg is the soft dark-slate tint behind the whole TUI so panes don't
+// sit on stark terminal black — modeled on Claude Squad's muted background
+// rather than a saturated brand color. Every pane container and text style
+// below paints this background so the slate fills the panes (not just the
+// gaps around them); fg-only styles would otherwise reset to terminal black.
+var workspaceBg = lipgloss.Color("#22222e")
 
-	// workspaceBg is the deep-purple tint we apply behind the whole TUI
-	// so panes don't sit on stark terminal black. Picked to match the
-	// ambient "we're in a special multi-agent context" vibe.
-	workspaceBg = lipgloss.Color("#1a0f26")
-	toastBox   = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Padding(0, 1)
-	attachTag  = lipgloss.NewStyle().Foreground(lipgloss.Color("16")).Background(lipgloss.Color("82")).Bold(true).Padding(0, 1)
+var (
+	// base carries the workspace background; other text styles inherit it so
+	// no segment punches a black hole between colored runs.
+	base = lipgloss.NewStyle().Background(workspaceBg)
+
+	border    = base.Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63"))
+	dim       = base.Foreground(lipgloss.Color("241"))
+	statusBar = base.Foreground(lipgloss.Color("252")).Padding(0, 1)
+	rowFocus  = base.Foreground(lipgloss.Color("212")).Bold(true)
+	rowDim    = base.Foreground(lipgloss.Color("250"))
+	repoTag   = base.Foreground(lipgloss.Color("147"))
+	awaitTag  = base.Foreground(lipgloss.Color("220")).Bold(true)
+	runTag    = base.Foreground(lipgloss.Color("117"))
+
+	toastBox  = base.Foreground(lipgloss.Color("196")).Padding(0, 1)
+	attachTag = lipgloss.NewStyle().Foreground(lipgloss.Color("16")).Background(lipgloss.Color("82")).Bold(true).Padding(0, 1)
+
+	// Tab bar atop the main pane: active tab gets a filled chip, the other
+	// reads as a dim, clickable-looking label.
+	tabActive   = lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(lipgloss.Color("60")).Bold(true).Padding(0, 2)
+	tabInactive = base.Foreground(lipgloss.Color("244")).Padding(0, 2)
+
+	// Per-session diff stats in the sidebar.
+	addStat = base.Foreground(lipgloss.Color("78"))  // green
+	delStat = base.Foreground(lipgloss.Color("203")) // red
+
+	// keybar is the context-sensitive shortcut strip along the bottom.
+	keybar    = base.Foreground(lipgloss.Color("245"))
+	keybarKey = base.Foreground(lipgloss.Color("117")).Bold(true)
 )
 
 func (w Workspace) View() string {
@@ -959,6 +1412,9 @@ func (w Workspace) View() string {
 	case ModeConfirm:
 		rendered = lipgloss.Place(w.width, w.height, lipgloss.Center, lipgloss.Center, w.renderConfirm(),
 			lipgloss.WithWhitespaceBackground(workspaceBg))
+	case ModeMemory:
+		rendered = lipgloss.Place(w.width, w.height, lipgloss.Center, lipgloss.Center, w.memModal.View(),
+			lipgloss.WithWhitespaceBackground(workspaceBg))
 	default:
 		rendered = view
 	}
@@ -983,20 +1439,44 @@ func (w Workspace) renderBody() string {
 	mainW := w.width - sidebarW - 4
 	bodyH := w.height - 3
 
-	sidebar := border.Width(sidebarW).Height(bodyH).Render(w.renderSidebar(sidebarW))
+	sidebar := border.Width(sidebarW).Height(bodyH).Render(w.renderSidebar(sidebarW, bodyH))
 	main := border.Width(mainW).Height(bodyH).Render(w.renderMain(mainW, bodyH-2))
 	return lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main)
 }
 
-func (w Workspace) renderSidebar(width int) string {
-	list := w.deps.Registry.List()
+func (w Workspace) renderSidebar(width, height int) string {
+	list := w.displayList()
 	if len(list) == 0 {
 		return "Sessions\n" +
 			dim.Render(strings.Repeat("─", width-2)) + "\n" +
 			dim.Render("(no sessions)\npress n to spawn")
 	}
-	rows := []string{"Sessions", dim.Render(strings.Repeat("─", width-2))}
-	for i, h := range list {
+	// Page the list so it never overflows the pane: each session occupies
+	// ~3 lines (label, repo+stats, spacer); header+rule take 2. Window
+	// around the focused entry so it's always visible, with ▲/▼ counts for
+	// what's scrolled off.
+	const perSession = 3
+	fit := max((height-2)/perSession, 1)
+	start := 0
+	if len(list) > fit {
+		focusIdx := 0
+		for i, h := range list {
+			if h.Session.ID == w.focused {
+				focusIdx = i
+				break
+			}
+		}
+		start = min(max(focusIdx-fit/2, 0), len(list)-fit)
+	}
+	end := min(start+fit, len(list))
+	window := list[start:end]
+
+	header := fmt.Sprintf("Sessions (%d)", len(list))
+	if start > 0 {
+		header += dim.Render(fmt.Sprintf("  ▲%d", start))
+	}
+	rows := []string{header, dim.Render(strings.Repeat("─", width-2))}
+	for i, h := range window {
 		// Status glyph + label gets prominence so the user can scan a
 		// long sidebar and spot what needs them.
 		var statusBit string
@@ -1014,9 +1494,22 @@ func (w Workspace) renderSidebar(width int) string {
 		// dimmed second line. Plus a blank line between entries so the
 		// sidebar reads cleanly when sessions multiply.
 		topLine := fmt.Sprintf("%s  %s", h.Session.Label(), statusBit)
+		// Second line: repo name plus +added/-deleted diff stats, the way
+		// Claude Squad surfaces churn at a glance.
+		// Separators go through base (slate bg) too — a plain " " here would
+		// sit after a styled segment's reset and render as terminal black.
 		var bottomLine string
 		if name := filepath.Base(h.Session.RepoRoot); name != "" {
-			bottomLine = repoTag.Render("  " + name)
+			bottomLine = repoTag.Render(name)
+		}
+		if st, ok := w.diffStats[h.Session.ID]; ok && (st.add > 0 || st.del > 0) {
+			stats := addStat.Render(fmt.Sprintf("+%d", st.add)) + base.Render(" ") +
+				delStat.Render(fmt.Sprintf("-%d", st.del))
+			if bottomLine != "" {
+				bottomLine += base.Render("  ") + stats
+			} else {
+				bottomLine = stats
+			}
 		}
 		if h.Session.ID == w.focused {
 			rows = append(rows, rowFocus.Render("▎ "+topLine))
@@ -1029,9 +1522,12 @@ func (w Workspace) renderSidebar(width int) string {
 				rows = append(rows, "  "+bottomLine)
 			}
 		}
-		if i < len(list)-1 {
+		if i < len(window)-1 {
 			rows = append(rows, "")
 		}
+	}
+	if end < len(list) {
+		rows = append(rows, dim.Render(fmt.Sprintf("  ▼%d more", len(list)-end)))
 	}
 	return strings.Join(rows, "\n")
 }
@@ -1041,28 +1537,55 @@ func (w Workspace) renderMain(_, height int) string {
 		return "Swarm v0.0.1-dev\n\n" +
 			dim.Render("welcome. press n to spawn a session.\n\n"+
 				"q quit · n new · j/k navigate · enter attach\n"+
-				"tab diff/live · x kill · A accept · d discard")
+				"tab cycle preview/diff/shell · x kill · d discard · m memory")
 	}
-	if w.viewMode == ViewDiff {
-		return w.renderDiff(height)
+	// Tab bar mirrors Claude Squad: Preview (live output) | Diff | Shell.
+	// The active chip is filled; tab cycles through them.
+	tabs := w.renderTabs()
+	contentH := max(height-1, 1)
+	var content string
+	switch w.viewMode {
+	case ViewDiff:
+		content = w.renderDiff(contentH)
+	case ViewShell:
+		content = cropTerminal(w.shellTerminals[w.focused], contentH,
+			dim.Render("starting shell… (enter to attach)"))
+	default:
+		content = cropTerminal(w.terminals[w.focused], contentH,
+			dim.Render("waiting for output…"))
 	}
-	term, ok := w.terminals[w.focused]
-	if !ok {
-		return dim.Render("waiting for output…")
+	return tabs + "\n" + content
+}
+
+// cropTerminal renders a session terminal cropped to its last `height` lines,
+// or `placeholder` when the terminal isn't ready yet.
+func cropTerminal(term *SessionTerminal, height int, placeholder string) string {
+	if term == nil {
+		return placeholder
 	}
-	out := term.Render()
-	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	lines := strings.Split(strings.TrimRight(term.Render(), "\n"), "\n")
 	if len(lines) > height {
 		lines = lines[len(lines)-height:]
 	}
 	return strings.Join(lines, "\n")
 }
 
-// renderDiff lays out the per-file selection list above the diff content
-// of the cursor's file. j/k or arrows navigate files, space toggles
-// keep/discard, 'a' starts the (selection-aware) accept flow.
+// renderTabs draws the Preview | Diff | Shell tab strip for the main pane.
+func (w Workspace) renderTabs() string {
+	tab := func(label string, mode ViewMode) string {
+		if w.viewMode == mode {
+			return tabActive.Render(label)
+		}
+		return tabInactive.Render(label)
+	}
+	return tab("Preview", ViewLive) + tab("Diff", ViewDiff) + tab("Shell", ViewShell)
+}
+
+// renderDiff is read-only review: a file list above the cursor file's diff
+// content. j/k navigate files, r refreshes. Integration happens in the
+// Shell tab, so there's no keep/discard or accept here.
 func (w Workspace) renderDiff(height int) string {
-	header := dim.Render("DIFF · tab back · j/k file · space keep/discard · a accept · r refresh")
+	header := dim.Render("j/k file · ctrl+d/u scroll · r refresh · shell tab to commit")
 	snap := w.diffSnapshots[w.focused]
 	if snap == nil {
 		return header + "\n" + dim.Render("loading diff…")
@@ -1073,73 +1596,85 @@ func (w Workspace) renderDiff(height int) string {
 
 	// Top: file list. Reserve 1 line per file, capped so we always leave
 	// at least half the pane for diff content.
-	maxList := len(snap.Files)
-	if maxList > height/2 {
-		maxList = height / 2
-	}
-	if maxList < 1 {
-		maxList = 1
-	}
+	maxList := min(len(snap.Files), max(height/2, 1))
 	listLines := make([]string, 0, maxList)
 	for i, f := range snap.Files {
 		if i >= maxList {
 			listLines = append(listLines, dim.Render(fmt.Sprintf("  …and %d more", len(snap.Files)-maxList)))
 			break
 		}
-		mark := "[ ]"
-		if f.Keep {
-			mark = awaitTag.Render("[✓]")
-		} else {
-			mark = dim.Render("[ ]")
-		}
-		row := fmt.Sprintf("%s %s", mark, f.Path)
+		row := "  " + f.Path
 		if i == snap.Cursor {
-			row = rowFocus.Render("▎ " + row)
-		} else {
-			row = "  " + row
+			row = rowFocus.Render("▎ " + f.Path)
 		}
 		listLines = append(listLines, row)
 	}
 
 	separator := dim.Render(strings.Repeat("─", 40))
 
-	// Bottom: diff content of the selected file, cropped to remaining
-	// rows.
-	contentBudget := height - len(listLines) - 3
-	if contentBudget < 1 {
-		contentBudget = 1
-	}
+	// Bottom: diff content of the selected file, windowed by ScrollY and
+	// cropped to remaining rows.
+	contentBudget := max(height-len(listLines)-3, 1)
 	contentLines := strings.Split(strings.TrimRight(snap.Files[snap.Cursor].Content, "\n"), "\n")
+	// Clamp scroll so the last page is the furthest you can go.
+	maxScroll := max(len(contentLines)-contentBudget, 0)
+	if snap.ScrollY > maxScroll {
+		snap.ScrollY = maxScroll
+	}
+	contentLines = contentLines[snap.ScrollY:]
 	if len(contentLines) > contentBudget {
 		contentLines = contentLines[:contentBudget]
+	}
+	if maxScroll > 0 {
+		separator = dim.Render(fmt.Sprintf("─── lines %d-%d/%d ",
+			snap.ScrollY+1, snap.ScrollY+len(contentLines), len(strings.Split(strings.TrimRight(snap.Files[snap.Cursor].Content, "\n"), "\n")))) +
+			dim.Render(strings.Repeat("─", 12))
 	}
 
 	return strings.Join(append(append([]string{header}, listLines...), append([]string{separator}, contentLines...)...), "\n")
 }
 
 func (w Workspace) renderStatus() string {
-	var head string
-	if w.mode == ModeAttached {
-		head = attachTag.Render("ATTACHED · ctrl+q to detach") + "  "
-	} else if w.focused != "" && w.viewMode == ViewLive {
-		// Always-visible affordance: tab gets you the diff. Discoverable
-		// without reading help text.
-		head = hintTag.Render("tab → diff") + "  "
-	} else if w.focused != "" && w.viewMode == ViewDiff {
-		head = hintTag.Render("tab → live") + "  "
-	}
-	parts := []string{fmt.Sprintf("%d sessions", w.deps.Registry.Len())}
-	if w.focused != "" {
-		label := w.focused
-		if h, ok := w.deps.Registry.Get(w.focused); ok {
-			label = h.Session.Label()
-		}
-		parts = append(parts, "focus="+label)
-	}
-	parts = append(parts, fmt.Sprintf("%dx%d", w.width, w.height))
-	left := head + strings.Join(parts, " · ")
+	bar := w.renderKeybar()
 	if w.toast != "" && time.Now().Before(w.toastUntil) {
-		return left + "  " + toastBox.Render("⚠ "+w.toast)
+		return bar + "  " + toastBox.Render("⚠ "+w.toast)
 	}
-	return left
+	return bar
+}
+
+// renderKeybar is the Claude Squad-style shortcut strip along the bottom.
+// Contents depend on the current mode and view so the user always sees the
+// keys that apply right now.
+func (w Workspace) renderKeybar() string {
+	type bind struct{ key, label string }
+	var binds []bind
+	switch {
+	case w.mode == ModeAttached:
+		dest := "agent"
+		if w.viewMode == ViewShell {
+			dest = "shell"
+		}
+		return attachTag.Render("ATTACHED") + "  " +
+			keybar.Render("keys → "+dest+" · ") + keybarKey.Render("ctrl+q") + keybar.Render(" detach")
+	case w.focused != "" && w.viewMode == ViewDiff:
+		binds = []bind{
+			{"tab", "shell"}, {"j/k", "file"}, {"r", "refresh"},
+			{"x", "kill"}, {"d", "discard"}, {"q", "quit"},
+		}
+	case w.focused != "" && w.viewMode == ViewShell:
+		binds = []bind{
+			{"↵", "attach"}, {"tab", "preview"}, {"j/k", "nav"},
+			{"d", "discard"}, {"q", "quit"},
+		}
+	default:
+		binds = []bind{
+			{"n", "new"}, {"↵", "attach"}, {"tab", "diff"}, {"j/k", "nav"},
+			{"x", "kill"}, {"d", "discard"}, {"m", "memory"}, {"q", "quit"},
+		}
+	}
+	parts := make([]string, len(binds))
+	for i, b := range binds {
+		parts[i] = keybarKey.Render(b.key) + keybar.Render(" "+b.label)
+	}
+	return strings.Join(parts, keybar.Render(" · "))
 }
