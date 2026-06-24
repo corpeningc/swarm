@@ -61,7 +61,7 @@ type NewSessionModal struct {
 
 func NewSessionModalFor(repo string, agents []string) NewSessionModal {
 	name := textinput.New()
-	name.Placeholder = "name (slug → worktree dir; existing names reattach)"
+	name.Placeholder = "name → git branch (e.g. h/1234); existing names reattach"
 	name.CharLimit = 40
 	name.Width = 60
 	name.Focus()

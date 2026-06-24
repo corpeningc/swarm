@@ -990,10 +990,12 @@ func (w Workspace) startSession(repo, prompt, name, agentName string, enableMCP 
 	// existing handle for this worktree so we can reattach to the same
 	// conversation rather than starting fresh.
 	dirName := worktreeDirName(name)
+	branchName := branchNameFromLabel(name)
 	var resumeID string
 	if dirName == "" {
-		// No name given: generate a fresh, unambiguous one.
+		// No name given: generate a fresh, unambiguous one. Branch matches.
 		dirName = w.deps.Registry.NextID()
+		branchName = dirName
 	} else {
 		for _, h := range w.deps.Registry.List() {
 			if h.Worktree == nil || filepath.Base(h.Worktree.Path) != dirName {
@@ -1020,17 +1022,22 @@ func (w Workspace) startSession(repo, prompt, name, agentName string, enableMCP 
 		var wt *worktree.Worktree
 		var err error
 		if _, statErr := os.Stat(path); statErr == nil {
-			// Reuse the existing worktree. Read its current HEAD as the
-			// effective base ref.
+			// Reuse the existing worktree. Read its actual checked-out branch
+			// (authoritative — the dir slug can't recover a slashed branch
+			// name like "h/1234") and its current HEAD as the diff base.
+			branch := worktree.CurrentBranch(ctx, path)
+			if branch == "" {
+				branch = branchName
+			}
 			wt = &worktree.Worktree{
 				ID:       dirName,
 				Path:     path,
 				BaseRef:  "HEAD",
-				Branch:   worktree.BranchName(dirName),
+				Branch:   branch,
 				RepoRoot: repo,
 			}
 		} else {
-			wt, err = w.deps.Git.Create(ctx, repo, "HEAD", dirName)
+			wt, err = w.deps.Git.Create(ctx, repo, "HEAD", dirName, branchName)
 			if err != nil {
 				return spawnErrorMsg{Err: "worktree: " + err.Error()}
 			}
@@ -1154,9 +1161,12 @@ func (w Workspace) resumeSession(h *session.Handle) tea.Cmd {
 	}
 }
 
-// worktreeDirName slugifies a user-supplied label into a filesystem-safe
-// directory name. Returns empty if the result would be empty (caller
-// generates an auto ID instead).
+// worktreeDirName slugifies a user-supplied label into a filesystem-safe,
+// flat directory name (lowercased, slashes/spaces collapsed to dashes).
+// This is the worktree's on-disk ID; branchNameFromLabel derives the git
+// branch separately so a name like "h/1234" yields dir "h-1234" but branch
+// "h/1234". Returns empty if the result would be empty (caller generates an
+// auto ID instead).
 func worktreeDirName(label string) string {
 	label = strings.TrimSpace(strings.ToLower(label))
 	if label == "" {
@@ -1177,6 +1187,41 @@ func worktreeDirName(label string) string {
 		}
 	}
 	return strings.TrimRight(b.String(), "-")
+}
+
+// branchNameFromLabel turns a user-supplied label into a git branch name,
+// preserving slashes so team conventions like "h/1234" or "feat/login" map
+// to exactly that branch. Whitespace becomes dashes; characters illegal in a
+// git ref are dropped; redundant or edge slashes/dashes are trimmed. Returns
+// empty for an empty/all-illegal label (caller falls back to the dir ID).
+func branchNameFromLabel(label string) string {
+	label = strings.TrimSpace(label)
+	var b strings.Builder
+	prevSep := false // last written rune was a slash or dash
+	for _, r := range label {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+			prevSep = r == '-'
+		case r == '/':
+			// Collapse repeats and never lead with a slash.
+			if !prevSep && b.Len() > 0 {
+				b.WriteByte('/')
+				prevSep = true
+			}
+		case r == ' ' || r == '\t':
+			if !prevSep && b.Len() > 0 {
+				b.WriteByte('-')
+				prevSep = true
+			}
+		}
+		// Everything else (git-ref-illegal: ~^:?*[\@ etc.) is dropped.
+	}
+	out := strings.Trim(b.String(), "-/.")
+	// Guard against ".." which git refs forbid.
+	out = strings.ReplaceAll(out, "..", ".")
+	return out
 }
 
 // refreshDiff runs `git -C <worktree> diff <baseRef>...HEAD --color=always`

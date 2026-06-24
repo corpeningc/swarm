@@ -37,19 +37,32 @@ func resolvePath(p string) string {
 	return p
 }
 
-// BranchName is the branch a swarm worktree checks out, namespaced so it's
-// easy to spot (and clean up) in `git branch`. The user commits, pushes, and
-// opens PRs from this branch in the Shell tab.
-func BranchName(id string) string { return "swarm/" + id }
+// CurrentBranch returns the branch checked out in the worktree at path, or ""
+// if it can't be determined (detached HEAD, or an orphan path git no longer
+// tracks). Best-effort; callers treat "" as "unknown".
+func CurrentBranch(ctx context.Context, path string) string {
+	out, err := exec.CommandContext(ctx, "git", "-C", path,
+		"rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	b := strings.TrimSpace(string(out))
+	if b == "HEAD" { // detached
+		return ""
+	}
+	return b
+}
 
-func (g *GitManager) Create(ctx context.Context, repoRoot, baseRef, id string) (*Worktree, error) {
+func (g *GitManager) Create(ctx context.Context, repoRoot, baseRef, id, branch string) (*Worktree, error) {
 	repoRoot = resolvePath(repoRoot)
 	path := filepath.Join(SwarmWorktreesDir(repoRoot), id)
 	if _, err := os.Stat(path); err == nil {
 		return nil, fmt.Errorf("%w at %s — run `swarm prune` to clean orphans",
 			ErrWorktreePathExists, path)
 	}
-	branch := BranchName(id)
+	if branch == "" {
+		branch = id
+	}
 	// Create the worktree on a fresh branch so git operations in the Shell
 	// tab work against a real, pushable branch rather than a detached HEAD.
 	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot,
@@ -67,12 +80,13 @@ func (g *GitManager) Create(ctx context.Context, repoRoot, baseRef, id string) (
 }
 
 func (g *GitManager) Destroy(ctx context.Context, w *Worktree) error {
-	// Best-effort: delete the swarm branch so discarded sessions don't leave
+	// Best-effort: delete the session branch so discarded sessions don't leave
 	// branches behind. Runs first because `worktree remove` frees the branch
-	// for deletion. Derive from ID when Branch isn't populated (e.g. prune).
+	// for deletion. When Branch isn't populated (e.g. prune constructs a bare
+	// Worktree), read it from git while the worktree is still on disk.
 	branch := w.Branch
-	if branch == "" && w.ID != "" {
-		branch = BranchName(w.ID)
+	if branch == "" {
+		branch = CurrentBranch(ctx, w.Path)
 	}
 	defer func() {
 		if branch != "" {

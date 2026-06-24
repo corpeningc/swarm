@@ -99,7 +99,7 @@ func TestGitManager_Lifecycle(t *testing.T) {
 
 	g := NewGitManager()
 
-	w, err := g.Create(ctx, repo, "main", "sess-test")
+	w, err := g.Create(ctx, repo, "main", "sess-test", "sess-test")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
