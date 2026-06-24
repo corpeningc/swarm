@@ -288,11 +288,16 @@ func fgCode(c terminal.Color) string {
 	return "\x1b[39m"
 }
 
+// defaultBgSGR paints cells the agent leaves at its default background with
+// the workspace slate (#22222e = rgb 34,34,46, must match workspaceBg) so
+// live output blends into the pane instead of showing stark terminal black.
+const defaultBgSGR = "\x1b[48;2;34;34;46m"
+
 // bgCode is the background equivalent of fgCode.
 func bgCode(c terminal.Color) string {
 	switch {
 	case c == terminal.DefaultBG:
-		return "\x1b[49m"
+		return defaultBgSGR
 	case c < 8:
 		return fmt.Sprintf("\x1b[4%dm", c)
 	case c < 16:
@@ -306,6 +311,17 @@ func bgCode(c terminal.Color) string {
 // Size reports the current terminal dimensions.
 func (t *SessionTerminal) Size() (cols, rows int) {
 	return t.cols, t.rows
+}
+
+// MouseMode reports whether the program running in this terminal has asked
+// for mouse reporting, and whether it wants SGR (1006) encoding. Used to
+// decide if forwarding a mouse event is safe — sending mouse bytes to a
+// program that didn't enable mouse mode (e.g. a bare shell) would land as
+// garbage on its input.
+func (t *SessionTerminal) MouseMode() (enabled, sgr bool) {
+	t.state.Lock()
+	defer t.state.Unlock()
+	return t.state.Mode(terminal.ModeMouseMask), t.state.Mode(terminal.ModeMouseSgr)
 }
 
 func clampMin(n, lo int) int {

@@ -18,6 +18,8 @@ import (
 
 	"github.com/calebcorpening/swarm/internal/agent"
 	"github.com/calebcorpening/swarm/internal/agent/claudecode"
+	"github.com/calebcorpening/swarm/internal/agent/genericcli"
+	"github.com/calebcorpening/swarm/internal/agent/shell"
 	"github.com/calebcorpening/swarm/internal/config"
 	"github.com/calebcorpening/swarm/internal/session"
 	"github.com/calebcorpening/swarm/internal/tui"
@@ -111,7 +113,13 @@ func runWorkspace(_ *cobra.Command, _ []string) error {
 		Registry:      registry,
 		Git:           worktree.NewGitManager(),
 		DefaultRepo:   defaultRepo,
-		AgentFactory:  func() agent.Agent { return claudecode.New("") },
+		AgentFactories: map[string]tui.AgentFactory{
+			"claude": func() agent.Agent { return claudecode.New("") },
+			"codex":  func() agent.Agent { return genericcli.New(genericcli.Codex()) },
+			"aider":  func() agent.Agent { return genericcli.New(genericcli.Aider()) },
+		},
+		AgentNames:    []string{"claude", "codex", "aider"},
+		ShellFactory:  func() agent.Agent { return shell.New() },
 		PickerStartIn: pickerStart,
 	}
 
@@ -125,7 +133,11 @@ func runWorkspace(_ *cobra.Command, _ []string) error {
 	if len(restored) > 0 {
 		fmt.Fprintf(os.Stderr, "restored %d session(s) from %s\n", len(restored), statePath)
 	}
-	p := tea.NewProgram(ws, tea.WithAltScreen())
+	// WithMouseCellMotion enables mouse reporting so the wheel can be
+	// forwarded to the focused agent (it scrolls its own transcript). Note
+	// this takes over the mouse, so terminal click-drag selection is
+	// disabled while swarm runs.
+	p := tea.NewProgram(ws, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err = p.Run()
 	return err
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/aymanbagabas/go-pty"
 
 	"github.com/calebcorpening/swarm/internal/agent"
+	"github.com/calebcorpening/swarm/internal/agent/ptyutil"
 )
 
 const (
@@ -184,6 +185,13 @@ func (a *Adapter) Kill() error {
 		return nil
 	case <-time.After(killGracePeriod):
 	}
+	// Escalate to the whole process tree. Claude spawns children (MCP
+	// servers, nested git) that survive a bare Process.Kill and keep file
+	// handles open inside the worktree — on Windows that's what blocks the
+	// subsequent `git worktree remove` / RemoveAll during discard.
+	// ptyutil.KillProcessTree is platform-specific (taskkill /T on Windows,
+	// process-group signal on Unix).
+	ptyutil.KillProcessTree(cmd.Process)
 	_ = cmd.Process.Kill()
 	if pt != nil {
 		_ = pt.Close()
@@ -242,6 +250,14 @@ func buildArgs(opts agent.SpawnOpts) []string {
 	if opts.ResumeID != "" {
 		args = append(args, "--resume", opts.ResumeID)
 	}
+	if opts.StrictMCP {
+		// Only load MCP servers passed via --mcp-config (none here), so the
+		// session doesn't boot the user's global MCP servers on startup.
+		args = append(args, "--strict-mcp-config")
+	}
+	if opts.AppendSystemPrompt != "" {
+		args = append(args, "--append-system-prompt", opts.AppendSystemPrompt)
+	}
 	args = append(args, opts.ExtraArgs...)
 	if opts.Prompt != "" {
 		args = append(args, opts.Prompt)
@@ -265,6 +281,16 @@ func mergeEnv(extra map[string]string, hooksDir string) []string {
 	if hooksDir != "" {
 		base = append(base, "SWARM_HOOKS_DIR="+hooksDir)
 	}
+	// Force Claude's fullscreen (alt-screen) renderer. Its classic renderer
+	// appends to the normal screen and relies on the host terminal's
+	// scrollback for history — which a swarm pane doesn't have, so the
+	// conversation can't be scrolled. Fullscreen owns a fixed viewport and
+	// implements its own scrolling (mouse wheel, PgUp/PgDn, Ctrl+O), which
+	// matches how swarm renders and is what makes scrollback work. The user
+	// can override by setting CLAUDE_CODE_NO_FLICKER in their env.
+	if _, ok := extra["CLAUDE_CODE_NO_FLICKER"]; !ok && os.Getenv("CLAUDE_CODE_NO_FLICKER") == "" {
+		base = append(base, "CLAUDE_CODE_NO_FLICKER=1")
+	}
 	for k, v := range extra {
 		base = append(base, k+"="+v)
 	}
@@ -276,6 +302,10 @@ func mergeEnv(extra map[string]string, hooksDir string) []string {
 // subcommand. Each event invocation lands a marker file in <hooksDir>/<id>/
 // that the parent swarm process polls to update session status without
 // waiting on the silence heuristic.
+//
+// It also pins permission/worktree settings that prevent Claude from creating
+// its own git worktree (see the cfg below), so its edits stay in the worktree
+// swarm manages and remain visible in the diff tab.
 //
 // We intentionally write to settings.local.json rather than settings.json:
 // it's claude's "personal-overrides" slot, gitignored by convention, and
@@ -310,6 +340,23 @@ func writeClaudeHooks(worktree, hooksDir, sessionID string) error {
 			// hook into <hooks>/<id>/session_start so the parent process
 			// can persist it without scraping PTY output.
 			"SessionStart": mkHook("session_start"),
+		},
+		// Claude is already running inside the worktree swarm created. Block
+		// every path by which it would spin up its OWN worktree, since that
+		// moves its edits into .claude/worktrees/<id> where swarm's diff tab
+		// (git -C <.swarm/worktrees/id> diff) can't see them. Deny rules are
+		// enforced even under --dangerously-skip-permissions: a bare tool name
+		// strips the tool from Claude's context entirely.
+		"permissions": map[string]any{
+			"deny": []string{
+				"EnterWorktree",            // direct worktree isolation tool
+				"Agent(isolation:worktree)", // subagents requesting their own worktree
+			},
+		},
+		// Keep background agents editing this working copy instead of
+		// auto-isolating into .claude/worktrees/.
+		"worktree": map[string]any{
+			"bgIsolation": "none",
 		},
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")

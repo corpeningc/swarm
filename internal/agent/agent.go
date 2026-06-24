@@ -53,6 +53,19 @@ type SpawnOpts struct {
 	// conversation. For Claude Code this maps to `claude --resume <id>`.
 	// Captured by Workspace from prior session output.
 	ResumeID string
+
+	// StrictMCP, when true, tells the adapter to launch without the user's
+	// globally-configured MCP servers (Claude Code's --strict-mcp-config).
+	// Swarm defaults this on because booting a dozen global MCP servers is
+	// the dominant cost of session startup; opt back in per session when a
+	// session actually needs those tools.
+	StrictMCP bool
+
+	// AppendSystemPrompt, if non-empty, is appended to the agent's default
+	// system prompt (Claude Code's --append-system-prompt). Swarm uses it to
+	// tell the agent it is already running inside an isolated worktree, so it
+	// shouldn't create its own.
+	AppendSystemPrompt string
 }
 
 type Agent interface {

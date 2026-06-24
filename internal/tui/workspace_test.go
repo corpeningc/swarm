@@ -58,3 +58,23 @@ func TestWorktreeDirName(t *testing.T) {
 		}
 	}
 }
+
+func TestBranchNameFromLabel(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"   ", ""},
+		{"h/1234", "h/1234"},               // team convention preserved verbatim
+		{"feat/login", "feat/login"},       // slashes kept
+		{"PR-142", "PR-142"},               // case preserved (git refs are case-sensitive)
+		{"fix login bug", "fix-login-bug"}, // spaces -> dashes
+		{"//leading//double//", "leading/double"},
+		{"trailing/", "trailing"},
+		{"weird~^:?*name", "weirdname"}, // git-ref-illegal chars dropped
+		{"a..b", "a.b"},                 // ".." is illegal in a git ref
+	}
+	for _, c := range cases {
+		if got := branchNameFromLabel(c.in); got != c.want {
+			t.Errorf("branchNameFromLabel(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

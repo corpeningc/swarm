@@ -63,6 +63,28 @@ func Append(repoRoot, entry string) error {
 	return err
 }
 
+// Write replaces the entire memory file with content (creating the parent
+// dir as needed). Used by the in-TUI memory editor. Trailing whitespace is
+// trimmed; an empty content removes the file so we don't leave a stub.
+func Write(repoRoot, content string) error {
+	if repoRoot == "" {
+		return nil
+	}
+	path := File(repoRoot)
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		err := os.Remove(path)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(trimmed+"\n"), 0644)
+}
+
 // PromptWithMemory wraps a user prompt with the repo's memory as context.
 // Returns the prompt unchanged if there's no memory to inject. Format is
 // chosen to look like part of the user's first turn so the agent treats
