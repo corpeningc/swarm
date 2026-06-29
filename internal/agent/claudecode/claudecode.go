@@ -24,8 +24,8 @@ import (
 
 	"github.com/aymanbagabas/go-pty"
 
-	"github.com/calebcorpening/swarm/internal/agent"
-	"github.com/calebcorpening/swarm/internal/agent/ptyutil"
+	"github.com/corpeningc/swarm/internal/agent"
+	"github.com/corpeningc/swarm/internal/agent/ptyutil"
 )
 
 const (

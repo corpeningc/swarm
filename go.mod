@@ -1,4 +1,4 @@
-module github.com/calebcorpening/swarm
+module github.com/corpeningc/swarm
 
 go 1.24.5
 

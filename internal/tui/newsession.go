@@ -8,7 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/calebcorpening/swarm/internal/worktree"
+	"github.com/corpeningc/swarm/internal/worktree"
 )
 
 // Messages emitted by the new-session modal. Workspace.Update intercepts these

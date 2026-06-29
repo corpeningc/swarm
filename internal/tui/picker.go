@@ -9,7 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/calebcorpening/swarm/internal/worktree"
+	"github.com/corpeningc/swarm/internal/worktree"
 )
 
 // PickerResultMsg is emitted when the user picks a directory and it

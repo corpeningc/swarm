@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/calebcorpening/swarm/internal/agent"
+	"github.com/corpeningc/swarm/internal/agent"
 )
 
 func TestBuildArgs(t *testing.T) {

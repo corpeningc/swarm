@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/calebcorpening/swarm/internal/agent"
-	"github.com/calebcorpening/swarm/internal/worktree"
+	"github.com/corpeningc/swarm/internal/agent"
+	"github.com/corpeningc/swarm/internal/worktree"
 )
 
 // Handle is the live runtime state of a session: its persistent metadata
