@@ -59,6 +59,30 @@ func TestWorktreeDirName(t *testing.T) {
 	}
 }
 
+func TestWorktreeDirNameAndRelPath(t *testing.T) {
+	cases := []struct {
+		in, wantDir, wantRel string
+	}{
+		{"", "", ""},
+		{"   ", "", ""},
+		{"h/1234", "h-1234", "h/1234"},
+		{"h/56679-usage-wallet-setup-refill", "h-56679-usage-wallet-setup-refill", "h/56679-usage-wallet-setup-refill"},
+		{"feat/login", "feat-login", "feat/login"},
+		{"fix login bug", "fix-login-bug", "fix-login-bug"},
+		{"//leading//double//", "leading-double", "leading/double"},
+		{"PR-142", "pr-142", "pr-142"}, // dir/rel are lowercased; branch keeps case
+		{"weird~^:?*name", "weirdname", "weirdname"},
+	}
+	for _, c := range cases {
+		if got := worktreeDirName(c.in); got != c.wantDir {
+			t.Errorf("worktreeDirName(%q) = %q, want %q", c.in, got, c.wantDir)
+		}
+		if got := worktreeRelPath(c.in); got != c.wantRel {
+			t.Errorf("worktreeRelPath(%q) = %q, want %q", c.in, got, c.wantRel)
+		}
+	}
+}
+
 func TestBranchNameFromLabel(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"", ""},

@@ -13,10 +13,12 @@ type Worktree struct {
 }
 
 type Manager interface {
-	// Create adds a worktree at .swarm/worktrees/<id> on a new branch named
-	// <branch>. id is the filesystem-safe slug (flat, no slashes); branch is
-	// the verbatim session name and may contain slashes (e.g. "h/1234").
-	Create(ctx context.Context, repoRoot, baseRef, id, branch string) (*Worktree, error)
+	// Create adds a worktree on a new branch named <branch>. id is the flat,
+	// filesystem-safe session slug (no slashes) recorded as Worktree.ID;
+	// relPath is the nested directory under .swarm/worktrees mirroring the
+	// branch (e.g. "h/1234", forward-slash, falls back to id when empty);
+	// branch is the verbatim session name and may contain slashes.
+	Create(ctx context.Context, repoRoot, baseRef, id, relPath, branch string) (*Worktree, error)
 	Destroy(ctx context.Context, w *Worktree) error
 	List(ctx context.Context, repoRoot string) ([]*Worktree, error)
 	ResolvePR(ctx context.Context, repoRoot string, prNumber int) (string, error)

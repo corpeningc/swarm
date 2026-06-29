@@ -19,6 +19,7 @@ type DiffSnapshot struct {
 	Files   []*DiffFile
 	Cursor  int
 	ScrollY int // first visible line of the selected file's diff content
+	ScrollX int // first visible column of the selected file's diff content
 }
 
 // SelectedFiles returns paths the user wants to keep.

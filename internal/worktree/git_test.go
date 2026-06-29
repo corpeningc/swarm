@@ -99,7 +99,7 @@ func TestGitManager_Lifecycle(t *testing.T) {
 
 	g := NewGitManager()
 
-	w, err := g.Create(ctx, repo, "main", "sess-test", "sess-test")
+	w, err := g.Create(ctx, repo, "main", "sess-test", "sess-test", "sess-test")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -126,6 +126,53 @@ func TestGitManager_Lifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(w.Path); !os.IsNotExist(err) {
 		t.Errorf("worktree path still exists after destroy: %v", err)
+	}
+}
+
+func TestCreateNestedWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	repo := t.TempDir()
+	ctx := context.Background()
+	mustRun(t, repo, "git", "init", "-b", "main")
+	mustRun(t, repo, "git", "config", "user.email", "test@example.com")
+	mustRun(t, repo, "git", "config", "user.name", "test")
+	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("hi"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, repo, "git", "add", "-A")
+	mustRun(t, repo, "git", "commit", "-m", "init")
+
+	g := NewGitManager()
+	// Flat id, nested relPath, slash-bearing branch.
+	w, err := g.Create(ctx, repo, "main", "h-1234", "h/1234", "h/1234")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Verify the path nests as .../worktrees/h/1234 (compare the leaf and its
+	// parent rather than the absolute path, which Create resolves through
+	// symlinks/8.3 short names on Windows).
+	if base, parent := filepath.Base(w.Path), filepath.Base(filepath.Dir(w.Path)); base != "1234" || parent != "h" {
+		t.Errorf("Path = %q, want it to nest under .../h/1234", w.Path)
+	}
+	if w.Branch != "h/1234" {
+		t.Errorf("Branch = %q, want h/1234", w.Branch)
+	}
+	if _, err := os.Stat(w.Path); err != nil {
+		t.Errorf("nested worktree not created: %v", err)
+	}
+
+	if rels := SwarmWorktreeRelPaths(repo); len(rels) != 1 || rels[0] != "h/1234" {
+		t.Errorf("SwarmWorktreeRelPaths = %v, want [h/1234]", rels)
+	}
+
+	if err := g.Destroy(ctx, w); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	// Leaf and its now-empty parent "h" should both be gone.
+	if _, err := os.Stat(filepath.Join(SwarmWorktreesDir(repo), "h")); !os.IsNotExist(err) {
+		t.Errorf("empty parent dir not cleaned up: %v", err)
 	}
 }
 

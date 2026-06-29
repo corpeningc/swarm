@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -53,9 +54,15 @@ func CurrentBranch(ctx context.Context, path string) string {
 	return b
 }
 
-func (g *GitManager) Create(ctx context.Context, repoRoot, baseRef, id, branch string) (*Worktree, error) {
+func (g *GitManager) Create(ctx context.Context, repoRoot, baseRef, id, relPath, branch string) (*Worktree, error) {
 	repoRoot = resolvePath(repoRoot)
-	path := filepath.Join(SwarmWorktreesDir(repoRoot), id)
+	// relPath is the nested directory mirroring the branch (e.g. "h/1234");
+	// fall back to the flat id when the caller doesn't supply one. git
+	// worktree add creates any leading directories itself.
+	if relPath == "" {
+		relPath = id
+	}
+	path := filepath.Join(SwarmWorktreesDir(repoRoot), filepath.FromSlash(relPath))
 	if _, err := os.Stat(path); err == nil {
 		return nil, fmt.Errorf("%w at %s — run `swarm prune` to clean orphans",
 			ErrWorktreePathExists, path)
@@ -111,7 +118,54 @@ func (g *GitManager) Destroy(ctx context.Context, w *Worktree) error {
 	// stale admin entry is exactly what makes a later create at this path fail
 	// with "is not a working tree". Best-effort: a prune failure isn't fatal.
 	_ = exec.CommandContext(ctx, "git", "-C", w.RepoRoot, "worktree", "prune").Run()
+	// Nested worktrees (e.g. h/1234) can leave an empty parent dir behind;
+	// sweep those up to the worktrees root so `git branch` namespaces don't
+	// litter the tree with empty directories.
+	if w.RepoRoot != "" {
+		cleanupEmptyParents(w.Path, SwarmWorktreesDir(resolvePath(w.RepoRoot)))
+	}
 	return nil
+}
+
+// cleanupEmptyParents removes empty parent directories of path, walking up but
+// never past stopAt (the swarm worktrees root). Best-effort and silent: the
+// first non-empty dir, read error, or escape from stopAt ends the sweep.
+func cleanupEmptyParents(path, stopAt string) {
+	dir := filepath.Dir(path)
+	for dir != stopAt && strings.HasPrefix(dir, stopAt+string(filepath.Separator)) {
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) > 0 {
+			return
+		}
+		if os.Remove(dir) != nil {
+			return
+		}
+		dir = filepath.Dir(dir)
+	}
+}
+
+// SwarmWorktreeRelPaths returns the forward-slash paths (relative to the swarm
+// worktrees dir) of every worktree under repoRoot — the leaf directories that
+// contain a ".git" entry, so a nested layout like "h/56679-foo" resolves to
+// the leaf rather than the intermediate "h". Sorted; nil when the dir is
+// absent. Shared by the new-session picker and `swarm prune`.
+func SwarmWorktreeRelPaths(repoRoot string) []string {
+	root := SwarmWorktreesDir(repoRoot)
+	var out []string
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() || p == root {
+			return nil
+		}
+		if _, statErr := os.Stat(filepath.Join(p, ".git")); statErr == nil {
+			if rel, relErr := filepath.Rel(root, p); relErr == nil {
+				out = append(out, filepath.ToSlash(rel))
+			}
+			return filepath.SkipDir // don't descend into a worktree's own tree
+		}
+		return nil
+	})
+	sort.Strings(out)
+	return out
 }
 
 // removeAllWithRetry deletes path, retrying a few times with a short backoff.

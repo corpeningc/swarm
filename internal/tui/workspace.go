@@ -17,6 +17,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/calebcorpening/swarm/internal/agent"
 	"github.com/calebcorpening/swarm/internal/config"
@@ -577,17 +578,23 @@ func (w Workspace) handleDiffKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	switch k.String() {
 	case "j", "down":
 		snap.Cursor = (snap.Cursor + 1) % len(snap.Files)
-		snap.ScrollY = 0 // new file starts at the top
+		snap.ScrollY, snap.ScrollX = 0, 0 // new file starts at the top-left
 		return w, nil, true
 	case "k", "up":
 		snap.Cursor = (snap.Cursor - 1 + len(snap.Files)) % len(snap.Files)
-		snap.ScrollY = 0
+		snap.ScrollY, snap.ScrollX = 0, 0
 		return w, nil, true
 	case "ctrl+d", "pgdown":
 		snap.ScrollY += 10
 		return w, nil, true
 	case "ctrl+u", "pgup":
 		snap.ScrollY = max(snap.ScrollY-10, 0)
+		return w, nil, true
+	case "l", "right":
+		snap.ScrollX += 10
+		return w, nil, true
+	case "h", "left":
+		snap.ScrollX = max(snap.ScrollX-10, 0)
 		return w, nil, true
 	}
 	return w, nil, false
@@ -989,16 +996,23 @@ func (w Workspace) startSession(repo, prompt, name, agentName string, enableMCP 
 	// registry safely. Same pass also picks up the ClaudeSessionID of any
 	// existing handle for this worktree so we can reattach to the same
 	// conversation rather than starting fresh.
-	dirName := worktreeDirName(name)
-	branchName := branchNameFromLabel(name)
+	dirName := worktreeDirName(name)    // flat, stable session ID
+	branchName := branchNameFromLabel(name) // slash-preserving git branch
+	relPath := worktreeRelPath(name)    // nested on-disk dir, mirrors branch
 	var resumeID string
+	var existingPath string // an already-known worktree path for this ID
 	if dirName == "" {
-		// No name given: generate a fresh, unambiguous one. Branch matches.
+		// No name given: generate a fresh, unambiguous one. Branch and dir
+		// match (no slashes to nest).
 		dirName = w.deps.Registry.NextID()
 		branchName = dirName
+		relPath = dirName
 	} else {
 		for _, h := range w.deps.Registry.List() {
-			if h.Worktree == nil || filepath.Base(h.Worktree.Path) != dirName {
+			// Match on the stable ID, not the path: a legacy session's dir
+			// may be flat (h-1234) while new ones nest (h/1234), but both
+			// resolve to the same ID.
+			if h.Session.ID != dirName || h.Worktree == nil {
 				continue
 			}
 			if h.Agent != nil {
@@ -1006,10 +1020,12 @@ func (w Workspace) startSession(repo, prompt, name, agentName string, enableMCP 
 				return func() tea.Msg { return spawnErrorMsg{Err: err} }
 			}
 			// Restored / interrupted handle for the same worktree:
-			// inherit its captured Claude session id.
+			// inherit its captured Claude session id and reuse its actual
+			// on-disk path (which may predate nested layout).
 			if h.Session.ClaudeSessionID != "" {
 				resumeID = h.Session.ClaudeSessionID
 			}
+			existingPath = h.Worktree.Path
 		}
 	}
 
@@ -1017,8 +1033,13 @@ func (w Workspace) startSession(repo, prompt, name, agentName string, enableMCP 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		// Decide create-vs-attach by checking whether the dir exists.
-		path := filepath.Join(worktree.SwarmWorktreesDir(repo), dirName)
+		// Prefer a known handle's path (covers legacy flat worktrees);
+		// otherwise nest under the worktrees dir to mirror the branch.
+		// Decide create-vs-attach by whether that path exists on disk.
+		path := existingPath
+		if path == "" {
+			path = filepath.Join(worktree.SwarmWorktreesDir(repo), filepath.FromSlash(relPath))
+		}
 		var wt *worktree.Worktree
 		var err error
 		if _, statErr := os.Stat(path); statErr == nil {
@@ -1029,6 +1050,11 @@ func (w Workspace) startSession(repo, prompt, name, agentName string, enableMCP 
 			if branch == "" {
 				branch = branchName
 			}
+			// Migrate legacy swarm/<slug> branches to the clean session
+			// branch so commits fast-forward the remote feature branch.
+			if reconcileLegacyBranch(ctx, path, branch, branchName) {
+				branch = branchName
+			}
 			wt = &worktree.Worktree{
 				ID:       dirName,
 				Path:     path,
@@ -1037,7 +1063,7 @@ func (w Workspace) startSession(repo, prompt, name, agentName string, enableMCP 
 				RepoRoot: repo,
 			}
 		} else {
-			wt, err = w.deps.Git.Create(ctx, repo, "HEAD", dirName, branchName)
+			wt, err = w.deps.Git.Create(ctx, repo, "HEAD", dirName, relPath, branchName)
 			if err != nil {
 				return spawnErrorMsg{Err: "worktree: " + err.Error()}
 			}
@@ -1161,32 +1187,51 @@ func (w Workspace) resumeSession(h *session.Handle) tea.Cmd {
 	}
 }
 
-// worktreeDirName slugifies a user-supplied label into a filesystem-safe,
-// flat directory name (lowercased, slashes/spaces collapsed to dashes).
-// This is the worktree's on-disk ID; branchNameFromLabel derives the git
-// branch separately so a name like "h/1234" yields dir "h-1234" but branch
-// "h/1234". Returns empty if the result would be empty (caller generates an
-// auto ID instead).
-func worktreeDirName(label string) string {
+// sessionSlugSegments lowercases a label and splits it into sanitized path
+// segments — one per slash-delimited component, each reduced to runs of
+// [a-z0-9] joined by single dashes. Empty segments are dropped. It's the
+// shared basis for both the flat session ID (segments joined by "-") and the
+// nested worktree directory (segments as subdirs), so the two never drift.
+func sessionSlugSegments(label string) []string {
 	label = strings.TrimSpace(strings.ToLower(label))
-	if label == "" {
-		return ""
-	}
-	var b strings.Builder
-	prevDash := false
-	for _, r := range label {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-			prevDash = false
-		case r == '-' || r == '_' || r == ' ' || r == '/':
-			if !prevDash && b.Len() > 0 {
-				b.WriteByte('-')
-				prevDash = true
+	var segs []string
+	for _, part := range strings.Split(label, "/") {
+		var b strings.Builder
+		prevDash := false
+		for _, r := range part {
+			switch {
+			case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+				b.WriteRune(r)
+				prevDash = false
+			case r == '-' || r == '_' || r == ' ':
+				if !prevDash && b.Len() > 0 {
+					b.WriteByte('-')
+					prevDash = true
+				}
 			}
 		}
+		if s := strings.TrimRight(b.String(), "-"); s != "" {
+			segs = append(segs, s)
+		}
 	}
-	return strings.TrimRight(b.String(), "-")
+	return segs
+}
+
+// worktreeDirName is the flat, filesystem-safe session ID: slug segments
+// joined by dashes, so "h/1234" yields "h-1234". Stable across the move to
+// nested worktree dirs, so existing sessions keep their IDs and reattach
+// instead of duplicating. Returns "" when nothing survives (caller generates
+// an auto ID). branchNameFromLabel derives the slash-preserving git branch.
+func worktreeDirName(label string) string {
+	return strings.Join(sessionSlugSegments(label), "-")
+}
+
+// worktreeRelPath is the worktree's on-disk directory relative to the swarm
+// worktrees root, nested to mirror the branch: "h/1234-foo" stays
+// "h/1234-foo" instead of flattening to a dash. Forward-slash separated;
+// callers FromSlash it for the local OS. Returns "" when nothing survives.
+func worktreeRelPath(label string) string {
+	return strings.Join(sessionSlugSegments(label), "/")
 }
 
 // branchNameFromLabel turns a user-supplied label into a git branch name,
@@ -1222,6 +1267,25 @@ func branchNameFromLabel(label string) string {
 	// Guard against ".." which git refs forbid.
 	out = strings.ReplaceAll(out, "..", ".")
 	return out
+}
+
+// reconcileLegacyBranch renames a worktree's legacy swarm/<slug> branch to the
+// clean, session-derived branch (e.g. "h/1234") so the user's commits
+// fast-forward the matching remote feature branch instead of a swarm-prefixed
+// dead end. No-op (returns false) unless the checked-out branch is
+// swarm-prefixed, a distinct target name is known, and that target doesn't
+// already exist. Best-effort: a git failure just leaves the branch as-is.
+func reconcileLegacyBranch(ctx context.Context, path, current, want string) bool {
+	if want == "" || want == current || !strings.HasPrefix(current, "swarm/") {
+		return false
+	}
+	// Don't clobber an existing branch of the target name.
+	if exec.CommandContext(ctx, "git", "-C", path,
+		"rev-parse", "--verify", "--quiet", "refs/heads/"+want).Run() == nil {
+		return false
+	}
+	return exec.CommandContext(ctx, "git", "-C", path,
+		"branch", "-m", current, want).Run() == nil
 }
 
 // refreshDiff runs `git -C <worktree> diff <baseRef>...HEAD --color=always`
@@ -1577,7 +1641,7 @@ func (w Workspace) renderSidebar(width, height int) string {
 	return strings.Join(rows, "\n")
 }
 
-func (w Workspace) renderMain(_, height int) string {
+func (w Workspace) renderMain(width, height int) string {
 	if w.focused == "" {
 		return "Swarm v0.0.1-dev\n\n" +
 			dim.Render("welcome. press n to spawn a session.\n\n"+
@@ -1591,7 +1655,7 @@ func (w Workspace) renderMain(_, height int) string {
 	var content string
 	switch w.viewMode {
 	case ViewDiff:
-		content = w.renderDiff(contentH)
+		content = w.renderDiff(width, contentH)
 	case ViewShell:
 		content = cropTerminal(w.shellTerminals[w.focused], contentH,
 			dim.Render("starting shell… (enter to attach)"))
@@ -1629,8 +1693,21 @@ func (w Workspace) renderTabs() string {
 // renderDiff is read-only review: a file list above the cursor file's diff
 // content. j/k navigate files, r refreshes. Integration happens in the
 // Shell tab, so there's no keep/discard or accept here.
-func (w Workspace) renderDiff(height int) string {
-	header := dim.Render("j/k file · ctrl+d/u scroll · r refresh · shell tab to commit")
+func (w Workspace) renderDiff(width, height int) string {
+	// Every line must be cropped to the pane's content width. Raw `git diff`
+	// lines are arbitrarily long, and if any exceeds the width, lipgloss
+	// word-wraps the ANSI-colored block when it renders the bordered pane —
+	// miscounting widths and scattering the border and line tails across the
+	// screen. Truncating up front keeps each line within bounds. ansi.Truncate
+	// is escape-aware so it crops by visible cells and closes open styles.
+	crop := func(s string) string {
+		if width <= 0 {
+			return s
+		}
+		return ansi.Truncate(s, width, "")
+	}
+
+	header := dim.Render("j/k file · ctrl+d/u scroll · h/l ←→ · r refresh · shell tab to commit")
 	snap := w.diffSnapshots[w.focused]
 	if snap == nil {
 		return header + "\n" + dim.Render("loading diff…")
@@ -1652,7 +1729,7 @@ func (w Workspace) renderDiff(height int) string {
 		if i == snap.Cursor {
 			row = rowFocus.Render("▎ " + f.Path)
 		}
-		listLines = append(listLines, row)
+		listLines = append(listLines, crop(row))
 	}
 
 	separator := dim.Render(strings.Repeat("─", 40))
@@ -1669,6 +1746,22 @@ func (w Workspace) renderDiff(height int) string {
 	contentLines = contentLines[snap.ScrollY:]
 	if len(contentLines) > contentBudget {
 		contentLines = contentLines[:contentBudget]
+	}
+	// Clamp horizontal scroll to the widest visible line so you can't scroll
+	// past the content into empty space.
+	if width > 0 {
+		widest := 0
+		for _, line := range contentLines {
+			if lw := ansi.StringWidth(line); lw > widest {
+				widest = lw
+			}
+		}
+		snap.ScrollX = max(min(snap.ScrollX, max(widest-width, 0)), 0)
+		// ansi.Cut returns the [left, right) cell window, escape-aware, so a
+		// horizontal offset never breaks a color span.
+		for i, line := range contentLines {
+			contentLines[i] = ansi.Cut(line, snap.ScrollX, snap.ScrollX+width)
+		}
 	}
 	if maxScroll > 0 {
 		separator = dim.Render(fmt.Sprintf("─── lines %d-%d/%d ",
@@ -1703,8 +1796,8 @@ func (w Workspace) renderKeybar() string {
 			keybar.Render("keys → "+dest+" · ") + keybarKey.Render("ctrl+q") + keybar.Render(" detach")
 	case w.focused != "" && w.viewMode == ViewDiff:
 		binds = []bind{
-			{"tab", "shell"}, {"j/k", "file"}, {"r", "refresh"},
-			{"x", "kill"}, {"d", "discard"}, {"q", "quit"},
+			{"tab", "shell"}, {"j/k", "file"}, {"h/l", "scroll"},
+			{"r", "refresh"}, {"x", "kill"}, {"d", "discard"}, {"q", "quit"},
 		}
 	case w.focused != "" && w.viewMode == ViewShell:
 		binds = []bind{

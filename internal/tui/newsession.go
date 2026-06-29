@@ -1,9 +1,7 @@
 package tui
 
 import (
-	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -62,7 +60,9 @@ type NewSessionModal struct {
 func NewSessionModalFor(repo string, agents []string) NewSessionModal {
 	name := textinput.New()
 	name.Placeholder = "name → git branch (e.g. h/1234); existing names reattach"
-	name.CharLimit = 40
+	// Generous cap — full feature-branch names (h/56679-usage-wallet-setup-...)
+	// must fit verbatim so the worktree branch matches the remote.
+	name.CharLimit = 120
 	name.Width = 60
 	name.Focus()
 
@@ -97,16 +97,10 @@ func (m *NewSessionModal) refreshWorktrees() {
 	if m.repo == "" {
 		return
 	}
-	entries, err := os.ReadDir(worktree.SwarmWorktreesDir(m.repo))
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			m.existingWorktrees = append(m.existingWorktrees, e.Name())
-		}
-	}
-	sort.Strings(m.existingWorktrees)
+	// Nested layout means a worktree can sit at h/56679-foo, not just a flat
+	// top-level dir — list leaf worktrees so selecting one round-trips the
+	// slashed name back into the branch.
+	m.existingWorktrees = worktree.SwarmWorktreeRelPaths(m.repo)
 }
 
 // agentName is the currently-selected agent backend.

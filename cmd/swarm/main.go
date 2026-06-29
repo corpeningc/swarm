@@ -190,29 +190,25 @@ func runPrune(_ *cobra.Command, _ []string) error {
 	}
 
 	swarmDir := worktree.SwarmWorktreesDir(repo)
-	entries, err := os.ReadDir(swarmDir)
-	if errors.Is(err, fs.ErrNotExist) {
+	if _, statErr := os.Stat(swarmDir); errors.Is(statErr, fs.ErrNotExist) {
 		fmt.Println("nothing to prune (.swarm/worktrees does not exist)")
 		return nil
 	}
-	if err != nil {
-		return err
-	}
+	// Find leaf worktrees, which may be nested (h/56679-foo), not just
+	// flat top-level dirs.
+	rels := worktree.SwarmWorktreeRelPaths(repo)
 
 	g := worktree.NewGitManager()
 	cleaned, failed := 0, 0
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		path := filepath.Join(swarmDir, entry.Name())
-		err := g.Destroy(ctx, &worktree.Worktree{ID: entry.Name(), Path: path, RepoRoot: repo})
+	for _, rel := range rels {
+		path := filepath.Join(swarmDir, filepath.FromSlash(rel))
+		err := g.Destroy(ctx, &worktree.Worktree{ID: rel, Path: path, RepoRoot: repo})
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  failed: %s: %v\n", entry.Name(), err)
+			fmt.Fprintf(os.Stderr, "  failed: %s: %v\n", rel, err)
 			failed++
 			continue
 		}
-		fmt.Printf("  removed %s\n", entry.Name())
+		fmt.Printf("  removed %s\n", rel)
 		cleaned++
 	}
 
