@@ -16,14 +16,14 @@ import (
 	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
 
-	"github.com/calebcorpening/swarm/internal/agent"
-	"github.com/calebcorpening/swarm/internal/agent/claudecode"
-	"github.com/calebcorpening/swarm/internal/agent/genericcli"
-	"github.com/calebcorpening/swarm/internal/agent/shell"
-	"github.com/calebcorpening/swarm/internal/config"
-	"github.com/calebcorpening/swarm/internal/session"
-	"github.com/calebcorpening/swarm/internal/tui"
-	"github.com/calebcorpening/swarm/internal/worktree"
+	"github.com/corpeningc/swarm/internal/agent"
+	"github.com/corpeningc/swarm/internal/agent/claudecode"
+	"github.com/corpeningc/swarm/internal/agent/genericcli"
+	"github.com/corpeningc/swarm/internal/agent/shell"
+	"github.com/corpeningc/swarm/internal/config"
+	"github.com/corpeningc/swarm/internal/session"
+	"github.com/corpeningc/swarm/internal/tui"
+	"github.com/corpeningc/swarm/internal/worktree"
 )
 
 var version = "0.0.1-dev"

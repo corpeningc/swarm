@@ -6,7 +6,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/calebcorpening/swarm/internal/memory"
+	"github.com/corpeningc/swarm/internal/memory"
 )
 
 // Messages emitted by the memory editor. Workspace.Update intercepts these to

@@ -19,11 +19,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/calebcorpening/swarm/internal/agent"
-	"github.com/calebcorpening/swarm/internal/config"
-	"github.com/calebcorpening/swarm/internal/memory"
-	"github.com/calebcorpening/swarm/internal/session"
-	"github.com/calebcorpening/swarm/internal/worktree"
+	"github.com/corpeningc/swarm/internal/agent"
+	"github.com/corpeningc/swarm/internal/config"
+	"github.com/corpeningc/swarm/internal/memory"
+	"github.com/corpeningc/swarm/internal/session"
+	"github.com/corpeningc/swarm/internal/worktree"
 )
 
 // Mode is the input-routing state of the workspace. Only one sub-component
