@@ -25,6 +25,13 @@ body {
 
 #app { display: flex; height: 100vh; }
 
+/* Window drag handles: the top bars move the window (Wails frameless-style
+   dragging). Interactive controls opt out so they stay clickable. */
+#sidebar-head, #tabbar { --wails-draggable: drag; }
+button, .tab, input, select, textarea, #session-list, #focus-actions {
+  --wails-draggable: no-drag;
+}
+
 /* ---- sidebar ---- */
 #sidebar {
   width: 248px;
