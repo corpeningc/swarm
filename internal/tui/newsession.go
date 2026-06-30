@@ -6,7 +6,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/corpeningc/swarm/internal/worktree"
 )
@@ -210,20 +209,6 @@ func (m *NewSessionModal) cycleFocus(delta int) {
 		m.prompt.Blur()
 	}
 }
-
-var (
-	modalBorder = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("63")).
-			Padding(1, 2)
-	modalTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
-	modalLabel = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	modalPath  = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	modalHint  = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Italic(true)
-
-	listFocusRow = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
-	listDimRow   = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
-)
 
 func (m NewSessionModal) View() string {
 	parts := []string{

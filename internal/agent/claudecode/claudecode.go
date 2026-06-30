@@ -279,7 +279,7 @@ func mergeEnv(extra map[string]string, hooksDir string) []string {
 		base = append(base, "TERM=xterm-256color")
 	}
 	if hooksDir != "" {
-		base = append(base, "SWARM_HOOKS_DIR="+hooksDir)
+		base = append(base, HookEnvVar+"="+hooksDir)
 	}
 	// Force Claude's fullscreen (alt-screen) renderer. Its classic renderer
 	// appends to the normal screen and relies on the host terminal's
@@ -368,4 +368,38 @@ func writeClaudeHooks(worktree, hooksDir, sessionID string) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "settings.local.json"), data, 0644)
+}
+
+// HookEnvVar is the environment variable writeClaudeHooks relies on to tell the
+// `swarm hook` subcommand where to drop marker files. mergeEnv sets it when
+// spawning Claude.
+const HookEnvVar = "SWARM_HOOKS_DIR"
+
+// RunHookMarker is the consumer side of writeClaudeHooks: it's invoked by
+// Claude Code's hook system inside a spawned session (via the swarm binary's
+// hidden `hook` subcommand) and drops a marker file whose existence the parent
+// swarm process detects on its activity tick.
+//
+// The marker path is <SWARM_HOOKS_DIR>/<sessionID>/<event>. If Claude piped a
+// JSON payload on stdin (it does for SessionStart, Stop, and Notification), the
+// payload becomes the file's content so the parent can read details like the
+// Claude session UUID; otherwise it's an empty marker.
+//
+// On any error or missing env we no-op silently — Claude doesn't care about the
+// result, and a failing hook must not interrupt the agent's flow. Crucially,
+// any binary that wires these hooks (TUI or desktop) must route its `hook`
+// invocation here rather than re-running its normal startup, or Claude's Stop
+// hook would relaunch the whole app instead of touching a marker.
+func RunHookMarker(event, sessionID string, stdin io.Reader) error {
+	hooksDir := os.Getenv(HookEnvVar)
+	if hooksDir == "" {
+		return nil
+	}
+	target := filepath.Join(hooksDir, sessionID, event)
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		return nil
+	}
+	payload, _ := io.ReadAll(stdin)
+	_ = os.WriteFile(target, payload, 0644)
+	return nil
 }
