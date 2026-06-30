@@ -30,6 +30,16 @@ import (
 var assets embed.FS
 
 func main() {
+	// Claude Code's hooks (wired by claudecode.writeClaudeHooks) invoke this
+	// same binary as `swarm-desktop hook <event> <session-id>`, because the
+	// hook command is os.Executable(). Handle that here and exit — without this
+	// the Stop hook would relaunch the whole Wails GUI, which fails to start
+	// outside a desktop context and surfaces as a stop-hook error.
+	if len(os.Args) >= 4 && os.Args[1] == "hook" {
+		_ = claudecode.RunHookMarker(os.Args[2], os.Args[3], os.Stdin)
+		return
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -153,24 +152,7 @@ func runWorkspace(_ *cobra.Command, _ []string) error {
 // spawning). On any error or missing env we no-op silently — Claude doesn't
 // care, and we don't want a failing hook to interrupt the agent's flow.
 func runHook(_ *cobra.Command, args []string) error {
-	hooksDir := os.Getenv("SWARM_HOOKS_DIR")
-	if hooksDir == "" {
-		return nil
-	}
-	event := args[0]
-	sessionID := args[1]
-	target := filepath.Join(hooksDir, sessionID, event)
-	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-		return nil
-	}
-	// Best-effort: read whatever Claude piped on stdin (~1KB JSON payload
-	// for SessionStart). If reading fails or stdin is empty, we still
-	// create an empty marker so the parent's existence check fires.
-	payload, _ := io.ReadAll(os.Stdin)
-	if err := os.WriteFile(target, payload, 0644); err != nil {
-		return nil
-	}
-	return nil
+	return claudecode.RunHookMarker(args[0], args[1], os.Stdin)
 }
 
 // runPrune walks .swarm/worktrees/ in the enclosing repo and removes every
