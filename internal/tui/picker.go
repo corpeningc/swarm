@@ -7,7 +7,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/filepicker"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/corpeningc/swarm/internal/worktree"
 )
@@ -77,11 +76,7 @@ func (p RepoPicker) View() string {
 		"",
 		modalHint.Render("enter select · esc cancel"),
 	}, "\n")
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("63")).
-		Padding(1, 2).
-		Render(body)
+	return modalBorder.Render(body)
 }
 
 // validateRepoCmd resolves the picked path to a git repo root. Runs

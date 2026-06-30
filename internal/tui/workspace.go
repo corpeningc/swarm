@@ -141,7 +141,7 @@ type Workspace struct {
 
 func NewWorkspace(deps WorkspaceDeps) Workspace {
 	return Workspace{
-		deps:          deps,
+		deps:           deps,
 		terminals:      make(map[string]*SessionTerminal),
 		shells:         make(map[string]agent.Agent),
 		shellTerminals: make(map[string]*SessionTerminal),
@@ -996,9 +996,9 @@ func (w Workspace) startSession(repo, prompt, name, agentName string, enableMCP 
 	// registry safely. Same pass also picks up the ClaudeSessionID of any
 	// existing handle for this worktree so we can reattach to the same
 	// conversation rather than starting fresh.
-	dirName := worktreeDirName(name)    // flat, stable session ID
+	dirName := worktreeDirName(name)        // flat, stable session ID
 	branchName := branchNameFromLabel(name) // slash-preserving git branch
-	relPath := worktreeRelPath(name)    // nested on-disk dir, mirrors branch
+	relPath := worktreeRelPath(name)        // nested on-disk dir, mirrors branch
 	var resumeID string
 	var existingPath string // an already-known worktree path for this ID
 	if dirName == "" {
@@ -1459,44 +1459,9 @@ func waitForEvent(id string, ch <-chan agent.Event) tea.Cmd {
 }
 
 // ----- view -----
-
-// workspaceBg is the soft dark-slate tint behind the whole TUI so panes don't
-// sit on stark terminal black — modeled on Claude Squad's muted background
-// rather than a saturated brand color. Every pane container and text style
-// below paints this background so the slate fills the panes (not just the
-// gaps around them); fg-only styles would otherwise reset to terminal black.
-var workspaceBg = lipgloss.Color("#22222e")
-
-var (
-	// base carries the workspace background; other text styles inherit it so
-	// no segment punches a black hole between colored runs.
-	base = lipgloss.NewStyle().Background(workspaceBg)
-
-	border    = base.Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63"))
-	dim       = base.Foreground(lipgloss.Color("241"))
-	statusBar = base.Foreground(lipgloss.Color("252")).Padding(0, 1)
-	rowFocus  = base.Foreground(lipgloss.Color("212")).Bold(true)
-	rowDim    = base.Foreground(lipgloss.Color("250"))
-	repoTag   = base.Foreground(lipgloss.Color("147"))
-	awaitTag  = base.Foreground(lipgloss.Color("220")).Bold(true)
-	runTag    = base.Foreground(lipgloss.Color("117"))
-
-	toastBox  = base.Foreground(lipgloss.Color("196")).Padding(0, 1)
-	attachTag = lipgloss.NewStyle().Foreground(lipgloss.Color("16")).Background(lipgloss.Color("82")).Bold(true).Padding(0, 1)
-
-	// Tab bar atop the main pane: active tab gets a filled chip, the other
-	// reads as a dim, clickable-looking label.
-	tabActive   = lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(lipgloss.Color("60")).Bold(true).Padding(0, 2)
-	tabInactive = base.Foreground(lipgloss.Color("244")).Padding(0, 2)
-
-	// Per-session diff stats in the sidebar.
-	addStat = base.Foreground(lipgloss.Color("78"))  // green
-	delStat = base.Foreground(lipgloss.Color("203")) // red
-
-	// keybar is the context-sensitive shortcut strip along the bottom.
-	keybar    = base.Foreground(lipgloss.Color("245"))
-	keybarKey = base.Foreground(lipgloss.Color("117")).Bold(true)
-)
+//
+// The palette and every shared style live in theme.go — a single cool, teal-
+// accented token set so colors never drift between components.
 
 func (w Workspace) View() string {
 	if w.quitting {
@@ -1514,33 +1479,29 @@ func (w Workspace) View() string {
 	switch w.mode {
 	case ModeNewSession:
 		rendered = lipgloss.Place(w.width, w.height, lipgloss.Center, lipgloss.Center, w.modal.View(),
-			lipgloss.WithWhitespaceBackground(workspaceBg))
+			lipgloss.WithWhitespaceBackground(colorBg))
 	case ModePicker:
 		rendered = lipgloss.Place(w.width, w.height, lipgloss.Center, lipgloss.Center, w.picker.View(),
-			lipgloss.WithWhitespaceBackground(workspaceBg))
+			lipgloss.WithWhitespaceBackground(colorBg))
 	case ModeConfirm:
 		rendered = lipgloss.Place(w.width, w.height, lipgloss.Center, lipgloss.Center, w.renderConfirm(),
-			lipgloss.WithWhitespaceBackground(workspaceBg))
+			lipgloss.WithWhitespaceBackground(colorBg))
 	case ModeMemory:
 		rendered = lipgloss.Place(w.width, w.height, lipgloss.Center, lipgloss.Center, w.memModal.View(),
-			lipgloss.WithWhitespaceBackground(workspaceBg))
+			lipgloss.WithWhitespaceBackground(colorBg))
 	default:
 		rendered = view
 	}
-	// Wrap the whole frame in the workspace's purple-tinted background
-	// so empty cells around panes get the brand color instead of stark
-	// terminal black. Embedded ANSI in cell content overrides locally,
-	// so colored output isn't affected.
-	return lipgloss.NewStyle().Background(workspaceBg).Render(rendered)
+	// Wrap the whole frame in the cool slate background so empty cells around
+	// panes get the canvas color instead of stark terminal black. Embedded
+	// ANSI in cell content overrides locally, so colored output isn't affected.
+	return base.Render(rendered)
 }
 
 func (w Workspace) renderConfirm() string {
-	body := w.confirmPrompt + "\n\n" + modalHint.Render("y confirm · n / esc cancel")
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("196")).
-		Padding(1, 2).
-		Render(body)
+	body := base.Foreground(colorTextHi).Render(w.confirmPrompt) + "\n\n" +
+		modalHint.Render("y confirm · n / esc cancel")
+	return confirmBorder.Render(body)
 }
 
 func (w Workspace) renderBody() string {
@@ -1548,15 +1509,21 @@ func (w Workspace) renderBody() string {
 	mainW := w.width - sidebarW - 4
 	bodyH := w.height - 3
 
-	sidebar := border.Width(sidebarW).Height(bodyH).Render(w.renderSidebar(sidebarW, bodyH))
-	main := border.Width(mainW).Height(bodyH).Render(w.renderMain(mainW, bodyH-2))
+	// The teal focus border follows input: the main pane owns it while
+	// attached, the sidebar owns it while navigating sessions.
+	sidebarBorder, mainBorder := paneBorderFocus, paneBorder
+	if w.mode == ModeAttached {
+		sidebarBorder, mainBorder = paneBorder, paneBorderFocus
+	}
+	sidebar := sidebarBorder.Width(sidebarW).Height(bodyH).Render(w.renderSidebar(sidebarW, bodyH))
+	main := mainBorder.Width(mainW).Height(bodyH).Render(w.renderMain(mainW, bodyH-2))
 	return lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main)
 }
 
 func (w Workspace) renderSidebar(width, height int) string {
 	list := w.displayList()
 	if len(list) == 0 {
-		return "Sessions\n" +
+		return sidebarTitle.Render("SESSIONS") + "\n" +
 			dim.Render(strings.Repeat("─", width-2)) + "\n" +
 			dim.Render("(no sessions)\npress n to spawn")
 	}
@@ -1580,7 +1547,7 @@ func (w Workspace) renderSidebar(width, height int) string {
 	end := min(start+fit, len(list))
 	window := list[start:end]
 
-	header := fmt.Sprintf("Sessions (%d)", len(list))
+	header := sidebarTitle.Render("SESSIONS") + base.Foreground(colorTextFaint).Render(fmt.Sprintf("  %d", len(list)))
 	if start > 0 {
 		header += dim.Render(fmt.Sprintf("  ▲%d", start))
 	}
@@ -1643,9 +1610,12 @@ func (w Workspace) renderSidebar(width, height int) string {
 
 func (w Workspace) renderMain(width, height int) string {
 	if w.focused == "" {
-		return "Swarm v0.0.1-dev\n\n" +
-			dim.Render("welcome. press n to spawn a session.\n\n"+
-				"q quit · n new · j/k navigate · enter attach\n"+
+		title := base.Foreground(colorAccentSoft).Bold(true).Render("swarm") +
+			base.Foreground(colorTextFaint).Render("  v0.0.1-dev")
+		return title + "\n\n" +
+			base.Foreground(colorTextMid).Render("Run multiple agents in parallel — each in its own worktree.") + "\n\n" +
+			dim.Render("press ") + keybarKey.Render("n") + dim.Render(" to spawn a session.") + "\n\n" +
+			dim.Render("q quit · n new · j/k navigate · enter attach\n"+
 				"tab cycle preview/diff/shell · x kill · d discard · m memory")
 	}
 	// Tab bar mirrors Claude Squad: Preview (live output) | Diff | Shell.

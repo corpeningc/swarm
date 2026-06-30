@@ -132,7 +132,7 @@ func rgbTo256(r, g, b int) int {
 
 func cube6(v int) int {
 	stops := [6]int{0, 95, 135, 175, 215, 255}
-	best, bestD := 0, 1 << 30
+	best, bestD := 0, 1<<30
 	for i, s := range stops {
 		d := v - s
 		if d < 0 {
@@ -289,9 +289,9 @@ func fgCode(c terminal.Color) string {
 }
 
 // defaultBgSGR paints cells the agent leaves at its default background with
-// the workspace slate (#22222e = rgb 34,34,46, must match workspaceBg) so
-// live output blends into the pane instead of showing stark terminal black.
-const defaultBgSGR = "\x1b[48;2;34;34;46m"
+// the workspace slate (#14171d = rgb 20,23,29, must match colorBg in theme.go)
+// so live output blends into the pane instead of showing stark terminal black.
+const defaultBgSGR = "\x1b[48;2;20;23;29m"
 
 // bgCode is the background equivalent of fgCode.
 func bgCode(c terminal.Color) string {

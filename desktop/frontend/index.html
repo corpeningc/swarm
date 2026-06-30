@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>swarm</title>
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <header id="sidebar-head">
+          <span class="brand">swarm</span>
+          <button id="new-btn" title="New session">+ New</button>
+        </header>
+        <ul id="session-list"></ul>
+        <footer id="sidebar-foot">
+          <button id="grid-toggle" title="Toggle grid of all live agents">▦ Grid</button>
+        </footer>
+      </aside>
+
+      <main id="main">
+        <div id="tabbar">
+          <button class="tab active" data-view="terminal">Terminal</button>
+          <button class="tab" data-view="diff">Diff</button>
+          <button class="tab" data-view="shell">Shell</button>
+          <span id="focus-title"></span>
+          <span id="focus-actions">
+            <button id="kill-btn" title="Kill agent (keep worktree)">Kill</button>
+            <button id="discard-btn" class="danger" title="Discard session + worktree">Discard</button>
+          </span>
+        </div>
+        <div id="view-terminal" class="view active">
+          <div id="term-host"></div>
+          <div id="term-empty" class="empty">No session selected. Press <b>+ New</b> to spawn an agent.</div>
+        </div>
+        <div id="view-diff" class="view"><pre id="diff-pre"></pre></div>
+        <div id="view-shell" class="view"><div id="shell-host"></div></div>
+      </main>
+    </div>
+
+    <!-- New-session modal -->
+    <div id="modal-backdrop" class="hidden">
+      <div id="modal">
+        <h2>New session</h2>
+        <label>Repository<input id="m-repo" type="text" placeholder="/path/to/repo" /></label>
+        <label>Name / branch<input id="m-name" type="text" placeholder="feat/login (optional)" /></label>
+        <label>Agent<select id="m-agent"></select></label>
+        <label class="check"><input id="m-mcp" type="checkbox" /> Enable global MCP servers (slower startup)</label>
+        <label>Prompt<textarea id="m-prompt" rows="5" placeholder="First message to the agent (optional)"></textarea></label>
+        <div id="modal-actions">
+          <button id="m-cancel">Cancel</button>
+          <button id="m-spawn" class="primary">Spawn</button>
+        </div>
+        <div id="modal-err"></div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "swarm",
+  "outputfilename": "swarm-desktop",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dir": "frontend",
+  "wailsjsdir": "./frontend/wailsjs",
+  "info": {
+    "productName": "swarm",
+    "comments": "Run multiple AI coding agents in parallel — desktop edition."
+  },
+  "author": {}
+}
