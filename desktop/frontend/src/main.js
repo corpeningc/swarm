@@ -14,6 +14,7 @@ let sessions = [];
 let focusedId = null;
 let view = "terminal";        // terminal | diff | shell
 let gridMode = false;
+let attached = false;         // true = keystrokes routed to the focused agent
 
 // ---- element refs ----
 const $ = (sel) => document.querySelector(sel);
@@ -54,7 +55,13 @@ function ensureTerm(id) {
   termEl.className = "pane-term";
   pane.appendChild(termEl);
 
-  pane.addEventListener("mousedown", () => focusSession(id));
+  // Clicking a terminal selects it; in single-pane view it also attaches, so a
+  // click-and-type lands in the agent like any terminal. In grid it only
+  // selects, so you can click around without hijacking the keyboard.
+  pane.addEventListener("mousedown", () => {
+    focusSession(id);
+    if (!gridMode) attach();
+  });
   termHost.appendChild(pane);
 
   const term = new Terminal(TERM_OPTS);
@@ -118,29 +125,58 @@ function renderSidebar() {
   }
 }
 
+// focusSession selects a session without sending it any input. Attaching
+// (routing keystrokes to the agent) is a separate, explicit step — see attach().
 function focusSession(id) {
+  if (attached && id !== focusedId) detach(); // switching focus drops the old attachment
   focusedId = id;
   const s = sessions.find((x) => x.id === id);
   focusTitle.textContent = s ? `${s.label} — ${s.branch || ""}` : "";
   termEmpty.classList.toggle("hidden", !!id);
-
-  if (s && !s.live && view === "terminal") {
-    // Restored session: offer resume.
-    if (confirmResume(s)) return;
-  }
   applyPaneVisibility();
   if (view === "diff") loadDiff(id);
   if (view === "shell") openShell(id);
   renderSidebar();
+  updateModeHint();
   fitVisible();
 }
 
-function confirmResume(s) {
-  // Lightweight inline resume: ensure a term exists, write a hint, and resume.
-  const entry = ensureTerm(s.id);
-  entry.term.write(`\r\n\x1b[33m[session stopped — resuming…]\x1b[0m\r\n`);
-  App?.ResumeSession(s.id).catch((e) => entry.term.write(`\r\n\x1b[31m${e}\x1b[0m\r\n`));
-  return false;
+// attach routes the keyboard to the focused session's agent. Resumes a stopped
+// session first. Mirrors the TUI's ModeAttached; Ctrl+Q detaches.
+function attach() {
+  if (!focusedId) return;
+  const s = sessions.find((x) => x.id === focusedId);
+  const entry = ensureTerm(focusedId);
+  if (s && !s.live) {
+    entry.term.write(`\r\n\x1b[33m[resuming…]\x1b[0m\r\n`);
+    App?.ResumeSession(focusedId).catch((e) => entry.term.write(`\r\n\x1b[31m${e}\x1b[0m\r\n`));
+  }
+  if (view !== "terminal") setView("terminal");
+  attached = true;
+  document.body.classList.add("attached");
+  entry.term.focus();
+  updateModeHint();
+}
+
+function detach() {
+  attached = false;
+  document.body.classList.remove("attached");
+  const entry = terms.get(focusedId);
+  if (entry) entry.term.blur();
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  updateModeHint();
+}
+
+function updateModeHint() {
+  const hint = $("#mode-hint");
+  if (!focusedId) { hint.textContent = ""; hint.classList.remove("attached"); return; }
+  if (attached) {
+    hint.textContent = "● attached — Ctrl+Q to detach";
+    hint.classList.add("attached");
+  } else {
+    hint.textContent = "navigation — ↵ to attach";
+    hint.classList.remove("attached");
+  }
 }
 
 function applyPaneVisibility() {
@@ -250,7 +286,17 @@ async function discardFocused() {
 // ---- modal ----
 const backdrop = $("#modal-backdrop");
 async function openModal() {
-  $("#m-repo").value = (await App?.DefaultRepo()) || "";
+  // Populate the repo type-ahead with known repos; default to the first (the
+  // launch repo). The user can type a path, pick a suggestion, or Browse…
+  const repos = (await App?.KnownRepos()) || [];
+  const dl = $("#repo-list");
+  dl.innerHTML = "";
+  for (const r of repos) {
+    const opt = document.createElement("option");
+    opt.value = r;
+    dl.appendChild(opt);
+  }
+  $("#m-repo").value = repos[0] || (await App?.DefaultRepo()) || "";
   $("#m-name").value = "";
   $("#m-prompt").value = "";
   $("#m-mcp").checked = false;
@@ -267,6 +313,15 @@ async function openModal() {
 }
 function closeModal() { backdrop.classList.add("hidden"); }
 
+async function browseForRepo() {
+  try {
+    const p = await App.BrowseForRepo();
+    if (p) $("#m-repo").value = p;
+  } catch (e) {
+    $("#modal-err").textContent = String(e);
+  }
+}
+
 async function spawn() {
   const repo = $("#m-repo").value.trim();
   if (!repo) { $("#modal-err").textContent = "repository path is required"; return; }
@@ -281,6 +336,7 @@ async function spawn() {
     ensureTerm(dto.id);
     await refreshSessions();
     focusSession(dto.id);
+    attach(); // land the user inside the fresh agent
   } catch (e) {
     $("#modal-err").textContent = String(e);
   } finally {
@@ -304,26 +360,75 @@ if (wails) {
   wails.EventsOn("sessions:change", () => refreshSessions());
 }
 
+// ---- navigation helpers ----
+function navFocus(delta) {
+  if (!sessions.length) return;
+  let idx = sessions.findIndex((s) => s.id === focusedId);
+  if (idx < 0) idx = 0;
+  else idx = (idx + delta + sessions.length) % sessions.length;
+  focusSession(sessions[idx].id);
+}
+
+function toggleGrid() {
+  gridMode = !gridMode;
+  $("#grid-toggle").classList.toggle("on", gridMode);
+  if (gridMode) { detach(); setView("terminal"); }
+  applyPaneVisibility();
+  fitVisible();
+}
+
+const VIEWS = ["terminal", "diff", "shell"];
+function cycleView() {
+  setView(VIEWS[(VIEWS.indexOf(view) + 1) % VIEWS.length]);
+}
+
+// ---- global keyboard ----
+// Two modes mirror the TUI: navigation (shortcuts) and attached (keystrokes go
+// to the agent, Ctrl+Q detaches). Capture phase so we beat xterm to the detach
+// chord. While attached, every other key falls through to the terminal.
+document.addEventListener("keydown", (ev) => {
+  const modalOpen = !backdrop.classList.contains("hidden");
+  if (modalOpen) {
+    if (ev.key === "Escape") closeModal();
+    if (ev.key === "Enter" && ev.target.id !== "m-prompt") { ev.preventDefault(); spawn(); }
+    return;
+  }
+  if (attached) {
+    if (ev.ctrlKey && (ev.key === "q" || ev.key === "Q")) {
+      ev.preventDefault(); ev.stopPropagation(); detach();
+    }
+    return; // all other keys belong to the agent
+  }
+  switch (ev.key) {
+    case "j": case "ArrowDown": ev.preventDefault(); navFocus(1); break;
+    case "k": case "ArrowUp": ev.preventDefault(); navFocus(-1); break;
+    case "n": ev.preventDefault(); openModal(); break;
+    case "x": ev.preventDefault(); killFocused(); break;
+    case "d": ev.preventDefault(); discardFocused(); break;
+    case "g": ev.preventDefault(); toggleGrid(); break;
+    case "Enter": ev.preventDefault(); attach(); break;
+    case "Tab": ev.preventDefault(); cycleView(); break;
+    case "1": ev.preventDefault(); setView("terminal"); break;
+    case "2": ev.preventDefault(); setView("diff"); break;
+    case "3": ev.preventDefault(); setView("shell"); break;
+  }
+}, true);
+
 // ---- wiring ----
 $("#new-btn").addEventListener("click", openModal);
 $("#m-cancel").addEventListener("click", closeModal);
 $("#m-spawn").addEventListener("click", spawn);
+$("#m-browse").addEventListener("click", browseForRepo);
 $("#kill-btn").addEventListener("click", killFocused);
 $("#discard-btn").addEventListener("click", discardFocused);
 document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => setView(t.dataset.view)));
-$("#grid-toggle").addEventListener("click", (e) => {
-  gridMode = !gridMode;
-  e.currentTarget.classList.toggle("on", gridMode);
-  if (gridMode) setView("terminal");
-  applyPaneVisibility();
-  fitVisible();
-});
+$("#grid-toggle").addEventListener("click", toggleGrid);
 backdrop.addEventListener("mousedown", (e) => { if (e.target === backdrop) closeModal(); });
 window.addEventListener("resize", fitVisible);
 new ResizeObserver(fitVisible).observe(termHost);
 
 // ---- boot ----
-refreshSessions().then(fitVisible);
+refreshSessions().then(() => { fitVisible(); updateModeHint(); });
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));

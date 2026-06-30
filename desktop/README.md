@@ -57,4 +57,26 @@ wails build    # produces build/bin/swarm-desktop.exe
 > only works after `frontend/dist/` exists.
 
 The app launches in the directory you run it from; that git repo becomes the
-default for new sessions (you can point at any repo in the New-session modal).
+default for new sessions. The New-session modal offers a type-ahead repo
+dropdown (launch repo + repos of existing sessions + sibling repos) and a
+**Browse…** button that opens the native folder picker.
+
+## Keyboard
+
+Two modes mirror the TUI. **Navigation** (default) drives the app; **attached**
+routes every keystroke to the focused agent.
+
+| Key | Action |
+|---|---|
+| `j` / `k` / `↑` / `↓` | move focus between sessions |
+| `Enter` | attach to the focused session (resumes it if stopped) |
+| `Ctrl+Q` | detach back to navigation |
+| `n` | new session |
+| `x` | kill agent (keep worktree) |
+| `d` | discard session + worktree |
+| `g` | toggle the grid of all live agents |
+| `Tab` | cycle Terminal → Diff → Shell |
+| `1` / `2` / `3` | jump to Terminal / Diff / Shell |
+
+Clicking a terminal in single-pane view also attaches; in grid view a click
+only selects, so you can click around without hijacking the keyboard.
