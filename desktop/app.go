@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -152,6 +153,28 @@ func (a *App) KillSession(id string) error {
 	err := a.orch.Kill(id)
 	a.emitChange()
 	return err
+}
+
+// ConfirmDiscard shows a native confirmation dialog for the destructive
+// discard action and reports whether the user chose to proceed. The frontend
+// can't use window.confirm(): Wails' WKWebView doesn't implement the JS
+// confirm panel, so confirm() silently returns false and discard never runs.
+// Routing through runtime.MessageDialog shows a real native dialog (the same
+// mechanism as the working folder picker).
+func (a *App) ConfirmDiscard(label string) (bool, error) {
+	const proceed = "Discard"
+	choice, err := wruntime.MessageDialog(a.ctx, wruntime.MessageDialogOptions{
+		Type:          wruntime.QuestionDialog,
+		Title:         "Discard session",
+		Message:       fmt.Sprintf("Discard %q? Its worktree and branch will be destroyed. This can't be undone.", label),
+		Buttons:       []string{proceed, "Cancel"},
+		DefaultButton: "Cancel",
+		CancelButton:  "Cancel",
+	})
+	if err != nil {
+		return false, err
+	}
+	return choice == proceed, nil
 }
 
 // DiscardSession kills the agent and destroys the worktree. Irreversible.

@@ -273,9 +273,18 @@ async function killFocused() {
 async function discardFocused() {
   if (!focusedId) return;
   const s = sessions.find((x) => x.id === focusedId);
-  if (!confirm(`Discard "${s?.label}"? The worktree will be destroyed.`)) return;
+  // Native dialog via Go — window.confirm() is a no-op in the Wails webview.
+  if (!(await App.ConfirmDiscard(s?.label ?? focusedId))) return;
   const id = focusedId;
-  await App.DiscardSession(id);
+  try {
+    await App.DiscardSession(id);
+  } catch (e) {
+    // The orchestrator removes the session from the registry even when the
+    // worktree can't be fully deleted, so still tear down the UI and refresh
+    // below to reflect reality; just surface the warning to the log.
+    wails?.LogError?.(`discard ${id}: ${e}`);
+    console.error("discard failed", e);
+  }
   const entry = terms.get(id);
   if (entry) { entry.term.dispose(); entry.pane.remove(); terms.delete(id); }
   shellTerms.delete(id);
