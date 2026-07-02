@@ -40,6 +40,11 @@ func main() {
 		return
 	}
 
+	// Launched from Finder/Applications, macOS hands us a minimal PATH that
+	// omits nvm/Homebrew/etc., so claude, node and shell tools would be
+	// unresolvable. Adopt the login shell's PATH before anything spawns.
+	config.FixLaunchPath()
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

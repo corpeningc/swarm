@@ -60,7 +60,9 @@ func shellCommand() (string, []string) {
 		return "cmd", nil
 	}
 	if sh := os.Getenv("SHELL"); sh != "" {
-		return sh, []string{"-i"}
+		// Login + interactive so the tab mirrors a real terminal: -l sources
+		// ~/.zprofile (nvm, path_helper), -i sources ~/.zshrc (aliases, PATH).
+		return sh, []string{"-l", "-i"}
 	}
 	for _, c := range []string{"bash", "sh"} {
 		if p, err := exec.LookPath(c); err == nil {
