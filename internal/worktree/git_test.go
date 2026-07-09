@@ -121,7 +121,7 @@ func TestGitManager_Lifecycle(t *testing.T) {
 		t.Errorf("created worktree not in list: %+v", list)
 	}
 
-	if err := g.Destroy(ctx, w); err != nil {
+	if err := g.Destroy(ctx, w, true); err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
 	if _, err := os.Stat(w.Path); !os.IsNotExist(err) {
@@ -167,7 +167,7 @@ func TestCreateNestedWorktree(t *testing.T) {
 		t.Errorf("SwarmWorktreeRelPaths = %v, want [h/1234]", rels)
 	}
 
-	if err := g.Destroy(ctx, w); err != nil {
+	if err := g.Destroy(ctx, w, true); err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
 	// Leaf and its now-empty parent "h" should both be gone.

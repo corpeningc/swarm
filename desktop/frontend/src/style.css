@@ -53,6 +53,12 @@ button, .tab, input, select, textarea, #session-list, #focus-actions {
 }
 .session:hover { background: var(--bg-elev2); }
 .session.focused { background: var(--bg-elev2); outline: 1px solid var(--accent); }
+.session.dragging { opacity: 0.45; outline: 1px dashed var(--accent); }
+.rename-input {
+  flex: 1; min-width: 0; background: var(--bg); color: var(--text);
+  border: 1px solid var(--accent); border-radius: 5px; padding: 1px 6px;
+  font: 600 12px var(--mono);
+}
 .session .row1 { display: flex; align-items: center; gap: 7px; }
 .session .label { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session .meta { color: var(--muted); font-size: 11px; padding-left: 15px; }
@@ -120,7 +126,9 @@ body.attached #main { box-shadow: inset 0 0 0 2px var(--green); }
 .term-pane .pane-title {
   display: none; font: 11px var(--mono); color: var(--muted);
   padding: 3px 8px; background: var(--bg-elev); border-bottom: 1px solid var(--border);
+  cursor: grab;
 }
+.term-pane.dragging { opacity: 0.45; outline: 1px dashed var(--accent); }
 #term-host.grid .term-pane .pane-title { display: block; }
 .term-pane .pane-term { position: absolute; inset: 0; }
 #term-host.grid .term-pane .pane-term { position: absolute; top: 22px; inset-inline: 0; bottom: 0; }
@@ -134,24 +142,26 @@ body.attached #main { box-shadow: inset 0 0 0 2px var(--green); }
 .diff-hunk { color: var(--accent); }
 .diff-meta { color: var(--muted); }
 
-/* ---- modal ---- */
-#modal-backdrop {
+/* ---- modals ---- */
+.modal-backdrop {
   position: fixed; inset: 0; background: rgba(0,0,0,0.55);
   display: flex; align-items: center; justify-content: center; z-index: 50;
 }
-#modal-backdrop.hidden { display: none; }
-#modal {
+.modal-backdrop.hidden { display: none; }
+.modal {
   width: 480px; background: var(--bg-elev); border: 1px solid var(--border);
   border-radius: 12px; padding: 20px 22px; display: flex; flex-direction: column; gap: 12px;
 }
-#modal h2 { margin: 0 0 4px; font-size: 16px; }
-#modal label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
-#modal label.check { flex-direction: row; align-items: center; gap: 8px; }
-#modal input[type=text], #modal select, #modal textarea {
+.modal h2 { margin: 0 0 4px; font-size: 16px; }
+.modal label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.modal label.check { flex-direction: row; align-items: center; gap: 8px; }
+.modal input[type=text], .modal select, .modal textarea {
   background: var(--bg); color: var(--text); border: 1px solid var(--border);
   border-radius: 7px; padding: 7px 9px; font: 13px var(--mono);
 }
-#modal textarea { resize: vertical; font-family: var(--mono); }
-#modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.modal textarea { resize: vertical; font-family: var(--mono); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.modal-sub { margin: 0; font-size: 13px; color: var(--text); }
+.modal-note { margin: 0; font-size: 12px; color: var(--muted); }
 #modal-err { color: var(--red); font-size: 12px; min-height: 14px; }
 .hidden { display: none !important; }

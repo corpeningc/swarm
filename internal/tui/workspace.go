@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/corpeningc/swarm/internal/agent"
+	"github.com/corpeningc/swarm/internal/agent/claudecode"
 	"github.com/corpeningc/swarm/internal/config"
 	"github.com/corpeningc/swarm/internal/memory"
 	"github.com/corpeningc/swarm/internal/session"
@@ -312,7 +313,7 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		w.lastActivity[m.ID] = time.Now()
 		// Activity always means running. If we'd flipped to
 		// awaiting-input during a quiet stretch, flip back.
-		if h, ok := w.deps.Registry.Get(m.ID); ok {
+		if h, ok := w.deps.Registry.Get(m.ID); ok && h.Agent != nil {
 			if h.Session.Status == session.StatusAwaitingInput {
 				w.deps.Registry.SetStatus(m.ID, session.StatusRunning)
 			}
@@ -337,7 +338,15 @@ func (w Workspace) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		maps.Copy(w.diffStats, m.stats)
 		return w, nil
 	case sessionDoneMsg:
-		w.deps.Registry.SetStatus(m.ID, session.StatusComplete)
+		// Drop the dead agent pointer so liveness checks (Agent == nil) open
+		// the resume path without a restart. Only flip active statuses to
+		// complete — a kill already recorded StatusKilled.
+		w.deps.Registry.ClearAgent(m.ID)
+		if h, ok := w.deps.Registry.Get(m.ID); ok {
+			if st := h.Session.Status; st == session.StatusRunning || st == session.StatusAwaitingInput {
+				w.deps.Registry.SetStatus(m.ID, session.StatusComplete)
+			}
+		}
 		// If we were attached to the session that just exited, drop back
 		// to idle so the user can choose a new focus.
 		if w.mode == ModeAttached && w.focused == m.ID {
@@ -855,10 +864,7 @@ func (w *Workspace) captureClaudeResume(id, text string) {
 	if len(match) < 2 {
 		return
 	}
-	h.Session.ClaudeSessionID = match[1]
-	// Triggers persist via SetStatus' write path. We could add a more
-	// specific helper but reusing the existing one keeps the API small.
-	w.deps.Registry.SetStatus(id, h.Session.Status)
+	w.deps.Registry.SetClaudeSessionID(id, match[1])
 }
 
 // mainPaneSize returns the interior dimensions of the main pane (the area
@@ -895,40 +901,17 @@ func (w *Workspace) checkHooks() {
 				}
 			}
 		}
-		if h.Session.ClaudeSessionID == "" {
-			path := filepath.Join(hooksSession, "session_start")
-			if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
-				if id := extractSessionID(data); id != "" {
-					h.Session.ClaudeSessionID = id
-					// Triggers persist via the SetStatus write path.
-					w.deps.Registry.SetStatus(h.Session.ID, h.Session.Status)
-				}
+		// Refresh on change, not just first capture: Claude assigns a NEW
+		// session id whenever a conversation is resumed (SessionStart fires
+		// again and rewrites the marker), and resuming with a stale id
+		// replays an old fork of the conversation.
+		path := filepath.Join(hooksSession, "session_start")
+		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+			if id := claudecode.ExtractSessionID(data); id != "" && id != h.Session.ClaudeSessionID {
+				w.deps.Registry.SetClaudeSessionID(h.Session.ID, id)
 			}
 		}
 	}
-}
-
-// extractSessionID pulls "session_id" out of the JSON payload Claude sends
-// to SessionStart hooks. Tolerant of the field appearing anywhere; we don't
-// fully decode the JSON to keep the dependency footprint zero.
-func extractSessionID(payload []byte) string {
-	const key = `"session_id"`
-	idx := strings.Index(string(payload), key)
-	if idx < 0 {
-		return ""
-	}
-	rest := string(payload[idx+len(key):])
-	// Skip past the colon and any whitespace, expect a quote.
-	rest = strings.TrimLeft(rest, ": \t\r\n")
-	if !strings.HasPrefix(rest, `"`) {
-		return ""
-	}
-	rest = rest[1:]
-	end := strings.Index(rest, `"`)
-	if end < 0 {
-		return ""
-	}
-	return rest[:end]
 }
 
 // evaluateAwaitingInput flips every Running session that's been silent
@@ -999,7 +982,8 @@ func (w Workspace) startSession(repo, prompt, name, agentName string, enableMCP 
 	dirName := worktreeDirName(name)        // flat, stable session ID
 	branchName := branchNameFromLabel(name) // slash-preserving git branch
 	relPath := worktreeRelPath(name)        // nested on-disk dir, mirrors branch
-	var resumeID string
+	var resumeID, nickname string
+	var sortKey int
 	var existingPath string // an already-known worktree path for this ID
 	if dirName == "" {
 		// No name given: generate a fresh, unambiguous one. Branch and dir
@@ -1026,6 +1010,10 @@ func (w Workspace) startSession(repo, prompt, name, agentName string, enableMCP 
 				resumeID = h.Session.ClaudeSessionID
 			}
 			existingPath = h.Worktree.Path
+			// Reattaching replaces the handle in place — keep its panel
+			// position and alias.
+			nickname = h.Session.Nickname
+			sortKey = h.Session.SortKey
 		}
 	}
 
@@ -1063,7 +1051,7 @@ func (w Workspace) startSession(repo, prompt, name, agentName string, enableMCP 
 				RepoRoot: repo,
 			}
 		} else {
-			wt, err = w.deps.Git.Create(ctx, repo, "HEAD", dirName, relPath, branchName)
+			wt, err = w.deps.Git.Create(ctx, repo, worktree.SeedRef(ctx, repo), dirName, relPath, branchName)
 			if err != nil {
 				return spawnErrorMsg{Err: "worktree: " + err.Error()}
 			}
@@ -1072,7 +1060,7 @@ func (w Workspace) startSession(repo, prompt, name, agentName string, enableMCP 
 			// .swarm/setup.{sh,ps1}. Clean up if it fails so we don't strand
 			// a half-prepared worktree.
 			if setupErr := worktree.RunSetupHook(repo, wt.Path); setupErr != nil {
-				_ = w.deps.Git.Destroy(context.Background(), wt)
+				_ = w.deps.Git.Destroy(context.Background(), wt, true)
 				return spawnErrorMsg{Err: setupErr.Error()}
 			}
 		}
@@ -1083,6 +1071,9 @@ func (w Workspace) startSession(repo, prompt, name, agentName string, enableMCP 
 		}
 		a := factory()
 		hooksDir := filepath.Join(repo, ".swarm", "hooks")
+		// Start from a clean marker dir: a stale session_start from a prior
+		// run would otherwise be read back as this spawn's conversation id.
+		_ = os.RemoveAll(filepath.Join(hooksDir, dirName))
 		_ = os.MkdirAll(filepath.Join(hooksDir, dirName), 0755)
 		// Inject project memory only on a fresh conversation. When we're
 		// resuming, the agent already has the prior context; piling
@@ -1111,21 +1102,22 @@ func (w Workspace) startSession(repo, prompt, name, agentName string, enableMCP 
 			// existed before we touched it. Only newly created worktrees
 			// (where dirName == NextID-style) get cleaned.
 			if strings.HasPrefix(dirName, "sess-") {
-				_ = w.deps.Git.Destroy(context.Background(), wt)
+				_ = w.deps.Git.Destroy(context.Background(), wt, true)
 			}
 			return spawnErrorMsg{Err: "spawn: " + err.Error()}
 		}
 		now := time.Now()
 		h := &session.Handle{
 			Session: &session.Session{
-				ID: dirName, Name: name, RepoRoot: repo, BaseRef: "HEAD",
+				ID: dirName, Name: name, Nickname: nickname, RepoRoot: repo, BaseRef: "HEAD",
 				Branch:   wt.Branch,
 				Worktree: wt.Path, AgentName: agentName,
-				Prompt: prompt, Status: session.StatusRunning,
+				Prompt: prompt, EnableMCP: enableMCP, Status: session.StatusRunning,
 				CreatedAt: now, UpdatedAt: now,
 				// Carry the captured resume id forward so it's
 				// visible in state.json and persists across restarts.
 				ClaudeSessionID: resumeID,
+				SortKey:         sortKey,
 			},
 			Worktree: wt, Agent: a,
 		}
@@ -1147,6 +1139,7 @@ func (w Workspace) resumeSession(h *session.Handle) tea.Cmd {
 	repo := s.RepoRoot
 	createdAt := s.CreatedAt
 	name, prompt, baseRef, branch := s.Name, s.Prompt, s.BaseRef, s.Branch
+	nickname, sortKey, enableMCP := s.Nickname, s.SortKey, s.EnableMCP
 	id := s.ID
 	factory := w.deps.agentFactory(agentName)
 	return func() tea.Msg {
@@ -1161,13 +1154,16 @@ func (w Workspace) resumeSession(h *session.Handle) tea.Cmd {
 		}
 		a := factory()
 		hooksDir := filepath.Join(repo, ".swarm", "hooks")
+		// Clean slate: the resumed conversation gets a NEW session id via a
+		// fresh SessionStart marker; a stale marker must not linger.
+		_ = os.RemoveAll(filepath.Join(hooksDir, id))
 		_ = os.MkdirAll(filepath.Join(hooksDir, id), 0755)
 		opts := agent.SpawnOpts{
 			Cwd:                wt.Path,
 			SessionID:          id,
 			HooksDir:           hooksDir,
 			ResumeID:           resumeID,
-			StrictMCP:          true,
+			StrictMCP:          !enableMCP,
 			AppendSystemPrompt: isolatedWorktreeGuidance,
 		}
 		if err := a.Spawn(context.Background(), opts); err != nil {
@@ -1176,10 +1172,10 @@ func (w Workspace) resumeSession(h *session.Handle) tea.Cmd {
 		now := time.Now()
 		w.deps.Registry.Add(&session.Handle{
 			Session: &session.Session{
-				ID: id, Name: name, RepoRoot: repo, BaseRef: baseRef, Branch: branch,
-				Worktree: wt.Path, AgentName: agentName, Prompt: prompt,
+				ID: id, Name: name, Nickname: nickname, RepoRoot: repo, BaseRef: baseRef, Branch: branch,
+				Worktree: wt.Path, AgentName: agentName, Prompt: prompt, EnableMCP: enableMCP,
 				Status: session.StatusRunning, CreatedAt: createdAt, UpdatedAt: now,
-				ClaudeSessionID: resumeID,
+				ClaudeSessionID: resumeID, SortKey: sortKey,
 			},
 			Worktree: wt, Agent: a,
 		})
@@ -1408,7 +1404,7 @@ func (w Workspace) discardSession(h *session.Handle) tea.Cmd {
 		defer cancel()
 		var warn string
 		if h.Worktree != nil {
-			if err := w.deps.Git.Destroy(ctx, h.Worktree); err != nil {
+			if err := w.deps.Git.Destroy(ctx, h.Worktree, true); err != nil {
 				// Don't strand the session in the list — the user asked for
 				// it gone. Remove it anyway; a leftover worktree dir is a
 				// `swarm prune` concern, not a reason to get stuck.

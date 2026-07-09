@@ -86,17 +86,17 @@ func (g *GitManager) Create(ctx context.Context, repoRoot, baseRef, id, relPath,
 	return &Worktree{ID: id, Path: path, BaseRef: baseRef, Branch: branch, RepoRoot: repoRoot}, nil
 }
 
-func (g *GitManager) Destroy(ctx context.Context, w *Worktree) error {
-	// Best-effort: delete the session branch so discarded sessions don't leave
-	// branches behind. Runs first because `worktree remove` frees the branch
-	// for deletion. When Branch isn't populated (e.g. prune constructs a bare
-	// Worktree), read it from git while the worktree is still on disk.
+func (g *GitManager) Destroy(ctx context.Context, w *Worktree, deleteBranch bool) error {
+	// Best-effort branch deletion, when requested. Resolved first because
+	// `worktree remove` frees the branch for deletion. When Branch isn't
+	// populated (e.g. prune constructs a bare Worktree), read it from git
+	// while the worktree is still on disk.
 	branch := w.Branch
 	if branch == "" {
 		branch = CurrentBranch(ctx, w.Path)
 	}
 	defer func() {
-		if branch != "" {
+		if deleteBranch && branch != "" {
 			_ = exec.CommandContext(ctx, "git", "-C", w.RepoRoot, "branch", "-D", branch).Run()
 		}
 	}()

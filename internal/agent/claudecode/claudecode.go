@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -390,6 +391,30 @@ const HookEnvVar = "SWARM_HOOKS_DIR"
 // any binary that wires these hooks (TUI or desktop) must route its `hook`
 // invocation here rather than re-running its normal startup, or Claude's Stop
 // hook would relaunch the whole app instead of touching a marker.
+// ExtractSessionID pulls "session_id" out of the JSON payload Claude pipes to
+// SessionStart hooks (the content of a session_start marker file). Tolerant of
+// the field appearing anywhere; we don't fully decode the JSON to keep the
+// dependency footprint zero. Returns "" when absent or malformed.
+func ExtractSessionID(payload []byte) string {
+	const key = `"session_id"`
+	idx := strings.Index(string(payload), key)
+	if idx < 0 {
+		return ""
+	}
+	rest := string(payload[idx+len(key):])
+	// Skip past the colon and any whitespace, expect a quote.
+	rest = strings.TrimLeft(rest, ": \t\r\n")
+	if !strings.HasPrefix(rest, `"`) {
+		return ""
+	}
+	rest = rest[1:]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
+}
+
 func RunHookMarker(event, sessionID string, stdin io.Reader) error {
 	hooksDir := os.Getenv(HookEnvVar)
 	if hooksDir == "" {

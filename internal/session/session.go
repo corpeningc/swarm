@@ -42,15 +42,20 @@ func (s Status) String() string {
 type Session struct {
 	ID        string
 	Name      string // optional user label; Label() falls back to ID when empty
+	Nickname  string // display-only alias; unlike Name it never affects the branch or worktree
 	RepoRoot  string
 	BaseRef   string
 	Branch    string // git branch checked out in the worktree (verbatim session name)
 	Worktree  string
 	AgentName string
 	Prompt    string
+	EnableMCP bool // spawn-time choice, persisted so resume matches it
 	Status    Status
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// SortKey is the session's manual position in the panel (lower = higher).
+	// 0 means never reordered — those sort by CreatedAt among themselves.
+	SortKey int
 	// ClaudeSessionID is captured from the agent's output (the
 	// "claude --resume <uuid>" line Claude prints) so we can reattach
 	// to the same conversation when the user spawns a new session into
@@ -58,9 +63,12 @@ type Session struct {
 	ClaudeSessionID string
 }
 
-// Label is the identifier shown to the user — the user-supplied name when
-// set, otherwise the auto-generated ID. Always non-empty.
+// Label is the identifier shown to the user — the nickname when set, then the
+// user-supplied name, then the auto-generated ID. Always non-empty.
 func (s *Session) Label() string {
+	if s.Nickname != "" {
+		return s.Nickname
+	}
 	if s.Name != "" {
 		return s.Name
 	}

@@ -184,7 +184,7 @@ func runPrune(_ *cobra.Command, _ []string) error {
 	cleaned, failed := 0, 0
 	for _, rel := range rels {
 		path := filepath.Join(swarmDir, filepath.FromSlash(rel))
-		err := g.Destroy(ctx, &worktree.Worktree{ID: rel, Path: path, RepoRoot: repo})
+		err := g.Destroy(ctx, &worktree.Worktree{ID: rel, Path: path, RepoRoot: repo}, true)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  failed: %s: %v\n", rel, err)
 			failed++

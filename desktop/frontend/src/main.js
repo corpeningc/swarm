@@ -50,6 +50,7 @@ function ensureTerm(id) {
   title.className = "pane-title";
   title.textContent = labelFor(id);
   pane.appendChild(title);
+  wirePaneDrag(pane, title, id); // grid tiles reorder by dragging the title bar
 
   const termEl = document.createElement("div");
   termEl.className = "pane-term";
@@ -110,19 +111,158 @@ function renderSidebar() {
   for (const s of sessions) {
     const li = document.createElement("li");
     li.className = "session" + (s.id === focusedId ? " focused" : "");
+    li.dataset.id = s.id;
     li.innerHTML = `
       <div class="row1">
         <span class="dot ${s.status}"></span>
         <span class="label">${escapeHtml(s.label)}</span>
       </div>
       <div class="meta">${escapeHtml(s.agentName || "claude")} · ${escapeHtml(s.branch || "")} ${s.live ? "" : "· (stopped)"}</div>`;
-    li.addEventListener("click", () => focusSession(s.id));
+    if (s.id === renamingId) {
+      const input = document.createElement("input");
+      input.className = "rename-input";
+      input.type = "text";
+      input.value = renameValue;
+      input.placeholder = s.name || s.id;
+      input.title = "Nickname — display only, branch/worktree keep their name. Empty clears it.";
+      input.addEventListener("input", () => { renameValue = input.value; });
+      input.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") commitRename();
+        if (e.key === "Escape") cancelRename();
+      });
+      input.addEventListener("blur", () => { if (renamingId === s.id) commitRename(); });
+      li.querySelector(".label").replaceWith(input);
+    } else {
+      li.addEventListener("click", () => focusSession(s.id));
+      li.addEventListener("dblclick", () => startRename(s.id));
+      wireRowDrag(li, s.id);
+    }
     listEl.appendChild(li);
   }
-  // Reflect live set into grid panes (mark which terminals belong to live ones).
+  // Reflect live set into grid panes: focus ring + label (nicknames change).
   for (const [id, entry] of terms) {
     entry.pane.classList.toggle("focused", id === focusedId);
+    entry.pane.querySelector(".pane-title").textContent = labelFor(id);
   }
+}
+
+// ---- drag to reorder ----
+// HTML5 DnD; the dragged row is moved in the DOM live (no re-render — that
+// would destroy the drag source and abort the drag), then the DOM order is
+// committed to the backend on dragend.
+let dragId = null;
+
+function wireRowDrag(li, id) {
+  li.draggable = true;
+  li.addEventListener("dragstart", (e) => {
+    dragId = id;
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", id); // some webviews need data to start a drag
+    requestAnimationFrame(() => li.classList.add("dragging"));
+  });
+  li.addEventListener("dragover", (e) => {
+    if (!dragId || dragId === id) return;
+    e.preventDefault();
+    const dragging = listEl.querySelector(`[data-id="${dragId}"]`);
+    if (!dragging) return;
+    const r = li.getBoundingClientRect();
+    listEl.insertBefore(dragging, e.clientY < r.top + r.height / 2 ? li : li.nextSibling);
+  });
+  li.addEventListener("drop", (e) => e.preventDefault());
+  li.addEventListener("dragend", () => {
+    li.classList.remove("dragging");
+    if (!dragId) return;
+    dragId = null;
+    commitOrder([...listEl.querySelectorAll(".session")].map((el) => el.dataset.id));
+  });
+}
+
+// commitOrder applies a full id order locally (sidebar + grid panes) and
+// persists it. The backend emits sessions:change, which re-syncs everything.
+async function commitOrder(order) {
+  sessions.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+  renderSidebar();
+  orderPanes();
+  await App?.ReorderSessions(order);
+}
+
+// wirePaneDrag makes a grid tile draggable by its title bar. Tiles shift live
+// while dragging (left half = drop before, right half = after); the resulting
+// pane order is merged back into the full session order on dragend.
+function wirePaneDrag(pane, handle, id) {
+  handle.draggable = true;
+  handle.addEventListener("dragstart", (e) => {
+    dragId = id;
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", id);
+    requestAnimationFrame(() => pane.classList.add("dragging"));
+  });
+  pane.addEventListener("dragover", (e) => {
+    if (!dragId || dragId === id || !gridMode) return;
+    e.preventDefault();
+    const dragging = terms.get(dragId)?.pane;
+    if (!dragging || dragging === pane) return;
+    const r = pane.getBoundingClientRect();
+    termHost.insertBefore(dragging, e.clientX < r.left + r.width / 2 ? pane : pane.nextSibling);
+  });
+  pane.addEventListener("drop", (e) => e.preventDefault());
+  handle.addEventListener("dragend", () => {
+    pane.classList.remove("dragging");
+    if (!dragId) return;
+    dragId = null;
+    commitPaneOrder();
+    fitVisible();
+  });
+}
+
+// commitPaneOrder derives the new session order from the grid's DOM order.
+// Sessions without a pane (restored, no terminal yet) keep their positions;
+// pane-backed sessions are re-slotted into the remaining spots in pane order.
+function commitPaneOrder() {
+  const paneOrder = [...termHost.querySelectorAll(".term-pane")].map((p) => p.dataset.id);
+  const inPanes = new Set(paneOrder);
+  let k = 0;
+  commitOrder(sessions.map((s) => (inPanes.has(s.id) ? paneOrder[k++] : s.id)));
+}
+
+// orderPanes keeps the grid tiles in session order. appendChild moves panes
+// in place; skip entirely when already ordered so terminals aren't churned.
+function orderPanes() {
+  const want = sessions.map((s) => terms.get(s.id)?.pane).filter(Boolean);
+  const have = [...termHost.querySelectorAll(".term-pane")];
+  if (want.length === have.length && want.every((p, i) => p === have[i])) return;
+  for (const p of want) termHost.appendChild(p);
+  fitVisible();
+}
+
+// ---- rename (nickname) ----
+// The nickname is a display-only alias — the branch and worktree keep the
+// session's real name. Enter or blur commits; empty input clears; Esc cancels.
+let renamingId = null;
+let renameValue = "";
+
+function startRename(id) {
+  const s = sessions.find((x) => x.id === id);
+  if (!s) return;
+  renamingId = id;
+  renameValue = s.nickname || "";
+  renderSidebar();
+  const input = listEl.querySelector(".rename-input");
+  if (input) { input.focus(); input.select(); }
+}
+
+async function commitRename() {
+  const id = renamingId;
+  if (id === null) return;
+  renamingId = null;
+  await App?.SetNickname(id, renameValue.trim());
+  await refreshSessions();
+}
+
+function cancelRename() {
+  renamingId = null;
+  renderSidebar();
 }
 
 // focusSession selects a session without sending it any input. Attaching
@@ -259,6 +399,7 @@ async function refreshSessions() {
   // early output is lost.
   for (const s of sessions) if (s.live) ensureTerm(s.id);
   renderSidebar();
+  orderPanes();
   if (focusedId) {
     const s = sessions.find((x) => x.id === focusedId);
     focusTitle.textContent = s ? `${s.label} — ${s.branch || ""}` : "";
@@ -270,14 +411,35 @@ async function refreshSessions() {
 async function killFocused() {
   if (focusedId) { await App.KillSession(focusedId); refreshSessions(); }
 }
-async function discardFocused() {
+// ---- discard modal ----
+// Two checkboxes escalate the teardown; both off (the default) just removes
+// the session from the panel, keeping worktree and branch reattachable.
+const discardBackdrop = $("#discard-backdrop");
+let discardTargetId = null;
+
+function openDiscardModal() {
   if (!focusedId) return;
-  const s = sessions.find((x) => x.id === focusedId);
-  // Native dialog via Go — window.confirm() is a no-op in the Wails webview.
-  if (!(await App.ConfirmDiscard(s?.label ?? focusedId))) return;
-  const id = focusedId;
+  discardTargetId = focusedId;
+  $("#d-label").textContent = `Remove "${labelFor(focusedId)}" from the panel?`;
+  $("#d-worktree").checked = false;
+  $("#d-branch").checked = false;
+  discardBackdrop.classList.remove("hidden");
+  $("#d-confirm").focus();
+}
+
+function closeDiscardModal() {
+  discardBackdrop.classList.add("hidden");
+  discardTargetId = null;
+}
+
+async function confirmDiscard() {
+  const id = discardTargetId;
+  if (!id) return;
+  const removeWorktree = $("#d-worktree").checked;
+  const deleteBranch = $("#d-branch").checked;
+  closeDiscardModal();
   try {
-    await App.DiscardSession(id);
+    await App.DiscardSession(id, removeWorktree, deleteBranch);
   } catch (e) {
     // The orchestrator removes the session from the registry even when the
     // worktree can't be fully deleted, so still tear down the UI and refresh
@@ -288,7 +450,7 @@ async function discardFocused() {
   const entry = terms.get(id);
   if (entry) { entry.term.dispose(); entry.pane.remove(); terms.delete(id); }
   shellTerms.delete(id);
-  focusedId = null;
+  if (focusedId === id) focusedId = null;
   await refreshSessions();
 }
 
@@ -396,6 +558,13 @@ function cycleView() {
 // to the agent, Ctrl+Q detaches). Capture phase so we beat xterm to the detach
 // chord. While attached, every other key falls through to the terminal.
 document.addEventListener("keydown", (ev) => {
+  // An active rename input owns the keyboard (it handles Enter/Esc itself).
+  if (renamingId !== null) return;
+  if (!discardBackdrop.classList.contains("hidden")) {
+    if (ev.key === "Escape") closeDiscardModal();
+    if (ev.key === "Enter") { ev.preventDefault(); confirmDiscard(); }
+    return;
+  }
   const modalOpen = !backdrop.classList.contains("hidden");
   if (modalOpen) {
     if (ev.key === "Escape") closeModal();
@@ -413,7 +582,8 @@ document.addEventListener("keydown", (ev) => {
     case "k": case "ArrowUp": ev.preventDefault(); navFocus(-1); break;
     case "n": ev.preventDefault(); openModal(); break;
     case "x": ev.preventDefault(); killFocused(); break;
-    case "d": ev.preventDefault(); discardFocused(); break;
+    case "d": ev.preventDefault(); openDiscardModal(); break;
+    case "r": ev.preventDefault(); if (focusedId) startRename(focusedId); break;
     case "g": ev.preventDefault(); toggleGrid(); break;
     case "Enter": ev.preventDefault(); attach(); break;
     case "Tab": ev.preventDefault(); cycleView(); break;
@@ -429,10 +599,17 @@ $("#m-cancel").addEventListener("click", closeModal);
 $("#m-spawn").addEventListener("click", spawn);
 $("#m-browse").addEventListener("click", browseForRepo);
 $("#kill-btn").addEventListener("click", killFocused);
-$("#discard-btn").addEventListener("click", discardFocused);
+$("#discard-btn").addEventListener("click", openDiscardModal);
+$("#d-cancel").addEventListener("click", closeDiscardModal);
+$("#d-confirm").addEventListener("click", confirmDiscard);
+// Deleting the branch only works once the worktree holding it is gone, so the
+// branch checkbox drags the worktree one along (and clearing worktree clears it).
+$("#d-branch").addEventListener("change", (e) => { if (e.target.checked) $("#d-worktree").checked = true; });
+$("#d-worktree").addEventListener("change", (e) => { if (!e.target.checked) $("#d-branch").checked = false; });
 document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => setView(t.dataset.view)));
 $("#grid-toggle").addEventListener("click", toggleGrid);
 backdrop.addEventListener("mousedown", (e) => { if (e.target === backdrop) closeModal(); });
+discardBackdrop.addEventListener("mousedown", (e) => { if (e.target === discardBackdrop) closeDiscardModal(); });
 window.addEventListener("resize", fitVisible);
 new ResizeObserver(fitVisible).observe(termHost);
 

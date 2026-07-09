@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
@@ -36,7 +36,30 @@ func NewApp(orch *core.Orchestrator) *App {
 	}
 }
 
-func (a *App) startup(ctx context.Context) { a.ctx = ctx }
+func (a *App) startup(ctx context.Context) {
+	a.ctx = ctx
+	go a.pollHooks()
+}
+
+// pollHooks is the desktop's twin of the TUI's activity tick: every second it
+// sweeps Claude's hook markers (stop/notify → awaiting-input, session_start →
+// the conversation id `claude --resume` needs). Without this the hooks the
+// desktop writes are write-only — statuses never flip and resumes start fresh
+// conversations. Ends with the Wails context on shutdown.
+func (a *App) pollHooks() {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-a.ctx.Done():
+			return
+		case <-t.C:
+			if a.orch.CheckHooks() {
+				a.emitChange()
+			}
+		}
+	}
+}
 
 // --- event names emitted to the frontend ---
 
@@ -63,6 +86,7 @@ type exitInfo struct {
 type SessionDTO struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
+	Nickname  string `json:"nickname"` // display alias; Label already prefers it
 	Label     string `json:"label"`
 	Repo      string `json:"repo"`
 	Branch    string `json:"branch"`
@@ -79,6 +103,7 @@ func toDTO(h *session.Handle) SessionDTO {
 	return SessionDTO{
 		ID:        h.Session.ID,
 		Name:      h.Session.Name,
+		Nickname:  h.Session.Nickname,
 		Label:     h.Session.Label(),
 		Repo:      h.Session.RepoRoot,
 		Branch:    branch,
@@ -155,38 +180,35 @@ func (a *App) KillSession(id string) error {
 	return err
 }
 
-// ConfirmDiscard shows a native confirmation dialog for the destructive
-// discard action and reports whether the user chose to proceed. The frontend
-// can't use window.confirm(): Wails' WKWebView doesn't implement the JS
-// confirm panel, so confirm() silently returns false and discard never runs.
-// Routing through runtime.MessageDialog shows a real native dialog (the same
-// mechanism as the working folder picker).
-func (a *App) ConfirmDiscard(label string) (bool, error) {
-	const proceed = "Discard"
-	choice, err := wruntime.MessageDialog(a.ctx, wruntime.MessageDialogOptions{
-		Type:          wruntime.QuestionDialog,
-		Title:         "Discard session",
-		Message:       fmt.Sprintf("Discard %q? Its worktree and branch will be destroyed. This can't be undone.", label),
-		Buttons:       []string{proceed, "Cancel"},
-		DefaultButton: "Cancel",
-		CancelButton:  "Cancel",
-	})
-	if err != nil {
-		return false, err
-	}
-	return choice == proceed, nil
-}
-
-// DiscardSession kills the agent and destroys the worktree. Irreversible.
-func (a *App) DiscardSession(id string) error {
+// DiscardSession kills the agent and removes the session from the panel.
+// removeWorktree and deleteBranch escalate the teardown; with both false the
+// worktree and branch survive and a same-named session reattaches to them.
+func (a *App) DiscardSession(id string, removeWorktree, deleteBranch bool) error {
 	a.stopShell(id)
-	err := a.orch.Discard(a.ctx, id)
+	err := a.orch.Discard(a.ctx, id, core.DiscardOpts{
+		RemoveWorktree: removeWorktree,
+		DeleteBranch:   deleteBranch,
+	})
 	a.mu.Lock()
 	delete(a.buffers, id)
 	delete(a.streaming, id)
 	a.mu.Unlock()
 	a.emitChange()
 	return err
+}
+
+// ReorderSessions rewrites the panel order to match ids (front to back) and
+// persists it, so a drag-reorder survives restarts.
+func (a *App) ReorderSessions(ids []string) {
+	a.orch.Registry().Reorder(ids)
+	a.emitChange()
+}
+
+// SetNickname sets (or clears, with "") a session's display alias. The
+// nickname never touches the branch or worktree — it's pure presentation.
+func (a *App) SetNickname(id, nickname string) {
+	a.orch.Registry().SetNickname(id, strings.TrimSpace(nickname))
+	a.emitChange()
 }
 
 // GetDiff returns the plain (uncolored) diff of a session's worktree vs its
@@ -289,6 +311,12 @@ func (a *App) streamAgent(id string, ag agent.Agent) {
 		case agent.EventOutput:
 			a.appendBuffer(id, ev.Text)
 			wruntime.EventsEmit(a.ctx, evtPTYData, ptyChunk{ID: id, Data: ev.Text})
+			// Activity means running: undo an awaiting-input flip from the
+			// stop/notify hooks once the agent starts producing output again.
+			if h, ok := a.orch.Registry().Get(id); ok && h.Session.Status == session.StatusAwaitingInput {
+				a.orch.Registry().SetStatus(id, session.StatusRunning)
+				a.emitChange()
+			}
 		case agent.EventError:
 			if ev.Err != nil {
 				msg := "\r\n[error] " + ev.Err.Error() + "\r\n"
@@ -302,7 +330,16 @@ func (a *App) streamAgent(id string, ag agent.Agent) {
 	a.mu.Lock()
 	a.streaming[id] = false
 	a.mu.Unlock()
-	a.orch.Registry().SetStatus(id, session.StatusComplete)
+	// Drop the dead agent pointer so the DTO's live flag reflects reality and
+	// the frontend's attach-to-resume path opens without an app restart. Only
+	// flip active statuses — a kill already recorded StatusKilled.
+	reg := a.orch.Registry()
+	reg.ClearAgent(id)
+	if h, ok := reg.Get(id); ok {
+		if st := h.Session.Status; st == session.StatusRunning || st == session.StatusAwaitingInput {
+			reg.SetStatus(id, session.StatusComplete)
+		}
+	}
 	a.emitChange()
 }
 

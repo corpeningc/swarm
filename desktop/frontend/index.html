@@ -22,7 +22,9 @@
             <span><kbd>^Q</kbd> detach</span>
             <span><kbd>x</kbd> kill</span>
             <span><kbd>d</kbd> discard</span>
+            <span><kbd>r</kbd> rename</span>
             <span><kbd>g</kbd> grid</span>
+            <span>drag to reorder</span>
             <span><kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> tabs</span>
           </div>
         </footer>
@@ -37,7 +39,7 @@
           <span id="mode-hint"></span>
           <span id="focus-actions">
             <button id="kill-btn" title="Kill agent (keep worktree)">Kill</button>
-            <button id="discard-btn" class="danger" title="Discard session + worktree">Discard</button>
+            <button id="discard-btn" class="danger" title="Remove session from panel…">Discard</button>
           </span>
         </div>
         <div id="view-terminal" class="view active">
@@ -50,8 +52,8 @@
     </div>
 
     <!-- New-session modal -->
-    <div id="modal-backdrop" class="hidden">
-      <div id="modal">
+    <div id="modal-backdrop" class="modal-backdrop hidden">
+      <div id="modal" class="modal">
         <h2>New session</h2>
         <label>Repository
           <div class="repo-row">
@@ -64,11 +66,26 @@
         <label>Agent<select id="m-agent"></select></label>
         <label class="check"><input id="m-mcp" type="checkbox" /> Enable global MCP servers (slower startup)</label>
         <label>Prompt<textarea id="m-prompt" rows="5" placeholder="First message to the agent (optional)"></textarea></label>
-        <div id="modal-actions">
+        <div class="modal-actions">
           <button id="m-cancel">Cancel</button>
           <button id="m-spawn" class="primary">Spawn</button>
         </div>
         <div id="modal-err"></div>
+      </div>
+    </div>
+
+    <!-- Discard modal -->
+    <div id="discard-backdrop" class="modal-backdrop hidden">
+      <div class="modal">
+        <h2>Discard session</h2>
+        <p id="d-label" class="modal-sub"></p>
+        <label class="check"><input id="d-worktree" type="checkbox" /> Also delete the worktree (files on disk)</label>
+        <label class="check"><input id="d-branch" type="checkbox" /> Also delete the branch</label>
+        <p class="modal-note">With both unchecked the session just leaves the panel — the worktree and branch stay, and a new session with the same name reattaches to them.</p>
+        <div class="modal-actions">
+          <button id="d-cancel">Cancel</button>
+          <button id="d-confirm" class="danger">Discard</button>
+        </div>
       </div>
     </div>
 

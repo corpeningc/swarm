@@ -19,7 +19,9 @@ type Manager interface {
 	// branch (e.g. "h/1234", forward-slash, falls back to id when empty);
 	// branch is the verbatim session name and may contain slashes.
 	Create(ctx context.Context, repoRoot, baseRef, id, relPath, branch string) (*Worktree, error)
-	Destroy(ctx context.Context, w *Worktree) error
+	// Destroy removes the worktree from disk. deleteBranch also deletes the
+	// session branch (a checked-out branch can't be deleted otherwise).
+	Destroy(ctx context.Context, w *Worktree, deleteBranch bool) error
 	List(ctx context.Context, repoRoot string) ([]*Worktree, error)
 	ResolvePR(ctx context.Context, repoRoot string, prNumber int) (string, error)
 }

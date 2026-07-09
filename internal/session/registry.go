@@ -69,6 +69,23 @@ func LoadOrNewRegistry(statePath string) (*Registry, []*Handle, error) {
 		return r, nil, fmt.Errorf("state.json malformed: %w", err)
 	}
 	r.counter.Store(ps.Counter)
+	// Backfill SortKeys for sessions from pre-SortKey state files (all zero):
+	// assign creation order so every session has a stable key. Without this,
+	// a legacy session would get max+1 on its first resume re-Add and jump to
+	// the bottom of the panel.
+	maxKey := 0
+	for _, s := range ps.Sessions {
+		maxKey = max(maxKey, s.SortKey)
+	}
+	sort.Slice(ps.Sessions, func(i, j int) bool {
+		return ps.Sessions[i].CreatedAt.Before(ps.Sessions[j].CreatedAt)
+	})
+	for _, s := range ps.Sessions {
+		if s.SortKey == 0 {
+			maxKey++
+			s.SortKey = maxKey
+		}
+	}
 	restored := make([]*Handle, 0, len(ps.Sessions))
 	for _, s := range ps.Sessions {
 		// A running session in state.json means swarm exited without
@@ -106,8 +123,20 @@ func (r *Registry) NextID() string {
 	return fmt.Sprintf("sess-%03d", n)
 }
 
+// Add registers a handle. A session that was never manually positioned
+// (SortKey 0) is appended after every positioned one; re-adds that carry a
+// SortKey (resume rebuilds the Session) keep their place.
 func (r *Registry) Add(h *Handle) {
 	r.mu.Lock()
+	if h.Session.SortKey == 0 {
+		maxKey := 0
+		for _, x := range r.handles {
+			if x.Session.SortKey > maxKey {
+				maxKey = x.Session.SortKey
+			}
+		}
+		h.Session.SortKey = maxKey + 1
+	}
 	r.handles[h.Session.ID] = h
 	r.persistLocked()
 	r.mu.Unlock()
@@ -127,8 +156,8 @@ func (r *Registry) Remove(id string) {
 	r.mu.Unlock()
 }
 
-// List returns handles sorted by session creation time (oldest first), so the
-// sidebar order is stable across renders.
+// List returns handles in panel order: by SortKey, with never-positioned
+// sessions (SortKey 0, from pre-SortKey state files) first in creation order.
 func (r *Registry) List() []*Handle {
 	r.mu.RLock()
 	out := make([]*Handle, 0, len(r.handles))
@@ -137,9 +166,63 @@ func (r *Registry) List() []*Handle {
 	}
 	r.mu.RUnlock()
 	sort.Slice(out, func(i, j int) bool {
+		if out[i].Session.SortKey != out[j].Session.SortKey {
+			return out[i].Session.SortKey < out[j].Session.SortKey
+		}
 		return out[i].Session.CreatedAt.Before(out[j].Session.CreatedAt)
 	})
 	return out
+}
+
+// Reorder rewrites the panel order to match ids, front to back. Unknown ids
+// are skipped; sessions missing from ids keep their old keys (self-heals on
+// the next full reorder). Persists once.
+func (r *Registry) Reorder(ids []string) {
+	r.mu.Lock()
+	for i, id := range ids {
+		if h, ok := r.handles[id]; ok {
+			h.Session.SortKey = i + 1
+		}
+	}
+	r.persistLocked()
+	r.mu.Unlock()
+}
+
+// SetClaudeSessionID records the agent-side conversation id used for
+// `claude --resume` and persists. Claude assigns a NEW id every time a
+// conversation is resumed, so callers must update on change, not just
+// first capture — a stale id resumes an old fork and drops later turns.
+func (r *Registry) SetClaudeSessionID(id, claudeID string) {
+	r.mu.Lock()
+	if h, ok := r.handles[id]; ok && h.Session.ClaudeSessionID != claudeID {
+		h.Session.ClaudeSessionID = claudeID
+		h.Session.UpdatedAt = time.Now()
+		r.persistLocked()
+	}
+	r.mu.Unlock()
+}
+
+// ClearAgent drops the handle's agent pointer once its process has exited,
+// so liveness checks (Agent != nil) reflect reality and resume paths open
+// up without an app restart. The session itself stays registered.
+func (r *Registry) ClearAgent(id string) {
+	r.mu.Lock()
+	if h, ok := r.handles[id]; ok {
+		h.Agent = nil
+	}
+	r.mu.Unlock()
+}
+
+// SetNickname sets (or clears, with "") a session's display alias and
+// persists. No-op for unknown ids.
+func (r *Registry) SetNickname(id, nickname string) {
+	r.mu.Lock()
+	if h, ok := r.handles[id]; ok {
+		h.Session.Nickname = nickname
+		h.Session.UpdatedAt = time.Now()
+		r.persistLocked()
+	}
+	r.mu.Unlock()
 }
 
 // SetStatus updates a session's status atomically; safe to call from any

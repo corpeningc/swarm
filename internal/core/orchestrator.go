@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/corpeningc/swarm/internal/agent"
+	"github.com/corpeningc/swarm/internal/agent/claudecode"
 	"github.com/corpeningc/swarm/internal/config"
 	"github.com/corpeningc/swarm/internal/memory"
 	"github.com/corpeningc/swarm/internal/session"
@@ -97,7 +98,8 @@ func (o *Orchestrator) Spawn(ctx context.Context, req SpawnRequest) (*session.Ha
 	branchName := branchNameFromLabel(req.Name)
 	relPath := worktreeRelPath(req.Name) // nested dir mirroring the branch
 
-	var resumeID, existingPath string
+	var resumeID, existingPath, nickname string
+	var sortKey int
 	if dirName == "" {
 		// No name: generate a fresh, unambiguous one. Branch and dir match.
 		dirName = o.deps.Registry.NextID()
@@ -117,6 +119,10 @@ func (o *Orchestrator) Spawn(ctx context.Context, req SpawnRequest) (*session.Ha
 				resumeID = h.Session.ClaudeSessionID
 			}
 			existingPath = h.Worktree.Path
+			// Reattaching replaces the handle in place — keep its panel
+			// position and alias.
+			nickname = h.Session.Nickname
+			sortKey = h.Session.SortKey
 		}
 	}
 
@@ -134,6 +140,9 @@ func (o *Orchestrator) Spawn(ctx context.Context, req SpawnRequest) (*session.Ha
 	}
 	a := factory()
 	hooksDir := filepath.Join(req.Repo, ".swarm", "hooks")
+	// Start from a clean marker dir: a stale session_start from a prior run
+	// would otherwise be read back as this spawn's conversation id.
+	_ = os.RemoveAll(filepath.Join(hooksDir, dirName))
 	_ = os.MkdirAll(filepath.Join(hooksDir, dirName), 0755)
 
 	// Inject project memory only on a fresh conversation; a resume already has
@@ -163,7 +172,7 @@ func (o *Orchestrator) Spawn(ctx context.Context, req SpawnRequest) (*session.Ha
 		// Only clean up worktrees we just created (auto-id sessions); a reused
 		// worktree existed before we touched it.
 		if strings.HasPrefix(dirName, "sess-") {
-			_ = o.deps.Git.Destroy(context.Background(), wt)
+			_ = o.deps.Git.Destroy(context.Background(), wt, true)
 		}
 		return nil, fmt.Errorf("spawn: %w", err)
 	}
@@ -171,10 +180,10 @@ func (o *Orchestrator) Spawn(ctx context.Context, req SpawnRequest) (*session.Ha
 	now := time.Now()
 	h := &session.Handle{
 		Session: &session.Session{
-			ID: dirName, Name: req.Name, RepoRoot: req.Repo, BaseRef: "HEAD",
+			ID: dirName, Name: req.Name, Nickname: nickname, RepoRoot: req.Repo, BaseRef: "HEAD",
 			Branch: wt.Branch, Worktree: wt.Path, AgentName: req.AgentName,
-			Prompt: req.Prompt, Status: session.StatusRunning,
-			CreatedAt: now, UpdatedAt: now, ClaudeSessionID: resumeID,
+			Prompt: req.Prompt, EnableMCP: req.EnableMCP, Status: session.StatusRunning,
+			CreatedAt: now, UpdatedAt: now, ClaudeSessionID: resumeID, SortKey: sortKey,
 		},
 		Worktree: wt, Agent: a,
 	}
@@ -205,14 +214,14 @@ func (o *Orchestrator) createOrAttachWorktree(ctx context.Context, repo, dirName
 		}, nil
 	}
 
-	wt, err := o.deps.Git.Create(ctx, repo, "HEAD", dirName, relPath, branchName)
+	wt, err := o.deps.Git.Create(ctx, repo, worktree.SeedRef(ctx, repo), dirName, relPath, branchName)
 	if err != nil {
 		return nil, fmt.Errorf("worktree: %w", err)
 	}
 	// Run any .swarm/setup.{sh,ps1} before the agent starts; clean up a
 	// half-prepared worktree if it fails.
 	if setupErr := worktree.RunSetupHook(repo, wt.Path); setupErr != nil {
-		_ = o.deps.Git.Destroy(context.Background(), wt)
+		_ = o.deps.Git.Destroy(context.Background(), wt, true)
 		return nil, setupErr
 	}
 	return wt, nil
@@ -241,13 +250,16 @@ func (o *Orchestrator) Resume(ctx context.Context, id string) (*session.Handle, 
 	}
 	a := factory()
 	hooksDir := filepath.Join(s.RepoRoot, ".swarm", "hooks")
+	// Clean slate: the resumed conversation gets a NEW session id via a fresh
+	// SessionStart marker; a stale marker must not linger.
+	_ = os.RemoveAll(filepath.Join(hooksDir, id))
 	_ = os.MkdirAll(filepath.Join(hooksDir, id), 0755)
 	opts := agent.SpawnOpts{
 		Cwd:                wt.Path,
 		SessionID:          id,
 		HooksDir:           hooksDir,
 		ResumeID:           s.ClaudeSessionID,
-		StrictMCP:          true,
+		StrictMCP:          !s.EnableMCP,
 		AppendSystemPrompt: isolatedWorktreeGuidance,
 	}
 	if err := a.Spawn(context.Background(), opts); err != nil {
@@ -256,10 +268,10 @@ func (o *Orchestrator) Resume(ctx context.Context, id string) (*session.Handle, 
 	now := time.Now()
 	resumed := &session.Handle{
 		Session: &session.Session{
-			ID: id, Name: s.Name, RepoRoot: s.RepoRoot, BaseRef: s.BaseRef, Branch: s.Branch,
-			Worktree: wt.Path, AgentName: s.AgentName, Prompt: s.Prompt,
+			ID: id, Name: s.Name, Nickname: s.Nickname, RepoRoot: s.RepoRoot, BaseRef: s.BaseRef, Branch: s.Branch,
+			Worktree: wt.Path, AgentName: s.AgentName, Prompt: s.Prompt, EnableMCP: s.EnableMCP,
 			Status: session.StatusRunning, CreatedAt: s.CreatedAt, UpdatedAt: now,
-			ClaudeSessionID: s.ClaudeSessionID,
+			ClaudeSessionID: s.ClaudeSessionID, SortKey: s.SortKey,
 		},
 		Worktree: wt, Agent: a,
 	}
@@ -281,28 +293,87 @@ func (o *Orchestrator) Kill(id string) error {
 	return nil
 }
 
-// Discard kills the agent, destroys the worktree and its branch, and removes
-// the session from the registry. Irreversible.
-func (o *Orchestrator) Discard(ctx context.Context, id string) error {
+// DiscardOpts controls how much Discard tears down beyond the session entry
+// itself. The zero value only removes the session from the panel — worktree
+// and branch stay on disk, and spawning a session with the same name later
+// reattaches to them.
+type DiscardOpts struct {
+	RemoveWorktree bool
+	// DeleteBranch requires RemoveWorktree: git refuses to delete a branch
+	// that's still checked out in a worktree.
+	DeleteBranch bool
+}
+
+// Discard kills the agent and removes the session from the registry. Per
+// opts it also destroys the worktree and/or deletes its branch.
+func (o *Orchestrator) Discard(ctx context.Context, id string, opts DiscardOpts) error {
 	h, ok := o.deps.Registry.Get(id)
 	if !ok {
 		return fmt.Errorf("discard: unknown session %q", id)
+	}
+	if opts.DeleteBranch && !opts.RemoveWorktree {
+		return fmt.Errorf("discard: deleting the branch requires deleting the worktree it's checked out in")
 	}
 	if h.Agent != nil {
 		_ = h.Agent.Kill()
 	}
 	if h.Worktree != nil {
-		if err := o.deps.Git.Destroy(ctx, h.Worktree); err != nil {
-			// Remove the session anyway so the user isn't stuck; surface the
-			// warning to the caller.
-			o.deps.Registry.Remove(id)
-			_ = os.RemoveAll(filepath.Join(h.Worktree.RepoRoot, ".swarm", "hooks", id))
-			return fmt.Errorf("worktree not fully removed: %w", err)
+		// Stale hook markers are removed in every case; a later reattach
+		// recreates the directory.
+		hooks := filepath.Join(h.Worktree.RepoRoot, ".swarm", "hooks", id)
+		if opts.RemoveWorktree {
+			if err := o.deps.Git.Destroy(ctx, h.Worktree, opts.DeleteBranch); err != nil {
+				// Remove the session anyway so the user isn't stuck; surface
+				// the warning to the caller.
+				o.deps.Registry.Remove(id)
+				_ = os.RemoveAll(hooks)
+				return fmt.Errorf("worktree not fully removed: %w", err)
+			}
 		}
-		_ = os.RemoveAll(filepath.Join(h.Worktree.RepoRoot, ".swarm", "hooks", id))
+		_ = os.RemoveAll(hooks)
 	}
 	o.deps.Registry.Remove(id)
 	return nil
+}
+
+// CheckHooks sweeps every session's hook-marker dir for files dropped by
+// Claude Code's hook system (see claudecode.writeClaudeHooks) and reports
+// whether anything changed, so the host can redraw:
+//
+//   - stop / notify: presence = the agent paused for input. Flip a running
+//     session to awaiting-input and consume the marker.
+//   - session_start: holds the JSON payload with the conversation id used
+//     for `claude --resume`. Refreshed on change, not just first capture —
+//     Claude assigns a NEW id on every resume, and resuming with a stale id
+//     replays an old fork of the conversation.
+//
+// Call it on a periodic tick (the TUI uses its activity tick; the desktop
+// app polls from a goroutine).
+func (o *Orchestrator) CheckHooks() bool {
+	changed := false
+	for _, h := range o.deps.Registry.List() {
+		if h.Worktree == nil {
+			continue
+		}
+		dir := filepath.Join(h.Worktree.RepoRoot, ".swarm", "hooks", h.Session.ID)
+		for _, event := range []string{"stop", "notify"} {
+			path := filepath.Join(dir, event)
+			if _, err := os.Stat(path); err == nil {
+				_ = os.Remove(path)
+				if h.Session.Status == session.StatusRunning {
+					o.deps.Registry.SetStatus(h.Session.ID, session.StatusAwaitingInput)
+					changed = true
+				}
+			}
+		}
+		if data, err := os.ReadFile(filepath.Join(dir, "session_start")); err == nil && len(data) > 0 {
+			if id := claudecode.ExtractSessionID(data); id != "" && id != h.Session.ClaudeSessionID {
+				o.deps.Registry.SetClaudeSessionID(h.Session.ID, id)
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 // Diff returns `git -C <worktree> diff <baseRef>` for a session, covering both
