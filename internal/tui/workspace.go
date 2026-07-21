@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"maps"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -22,6 +21,7 @@ import (
 	"github.com/corpeningc/swarm/internal/agent"
 	"github.com/corpeningc/swarm/internal/agent/claudecode"
 	"github.com/corpeningc/swarm/internal/config"
+	"github.com/corpeningc/swarm/internal/execx"
 	"github.com/corpeningc/swarm/internal/memory"
 	"github.com/corpeningc/swarm/internal/session"
 	"github.com/corpeningc/swarm/internal/worktree"
@@ -1276,11 +1276,11 @@ func reconcileLegacyBranch(ctx context.Context, path, current, want string) bool
 		return false
 	}
 	// Don't clobber an existing branch of the target name.
-	if exec.CommandContext(ctx, "git", "-C", path,
+	if execx.Command(ctx, "git", "-C", path,
 		"rev-parse", "--verify", "--quiet", "refs/heads/"+want).Run() == nil {
 		return false
 	}
-	return exec.CommandContext(ctx, "git", "-C", path,
+	return execx.Command(ctx, "git", "-C", path,
 		"branch", "-m", current, want).Run() == nil
 }
 
@@ -1304,7 +1304,7 @@ func (w Workspace) refreshDiff(h *session.Handle) tea.Cmd {
 		// the worktree's reflog — comparing against it covers both
 		// committed and uncommitted changes the agent made.
 		args := []string{"-C", wt.Path, "diff", "--color=always", baseRef}
-		out, err := exec.CommandContext(ctx, "git", args...).CombinedOutput()
+		out, err := execx.Command(ctx, "git", args...).CombinedOutput()
 		if err != nil {
 			return diffRefreshedMsg{ID: id, Err: "diff: " + strings.TrimSpace(string(out))}
 		}
@@ -1345,7 +1345,7 @@ func (w Workspace) refreshStats() tea.Cmd {
 		stats := make(map[string]diffStat, len(items))
 		for _, it := range items {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			out, err := exec.CommandContext(ctx, "git", "-C", it.path,
+			out, err := execx.Command(ctx, "git", "-C", it.path,
 				"diff", "--numstat", it.base).Output()
 			cancel()
 			if err != nil {

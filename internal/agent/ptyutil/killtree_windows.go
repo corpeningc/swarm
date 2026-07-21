@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"syscall"
 )
 
 // KillProcessTree terminates p and all of its descendants. os.Process.Kill on
@@ -18,5 +19,8 @@ func KillProcessTree(p *os.Process) {
 	if p == nil {
 		return
 	}
-	_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(p.Pid)).Run()
+	cmd := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(p.Pid))
+	// No console flash when the GUI app kills a session (CREATE_NO_WINDOW).
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+	_ = cmd.Run()
 }

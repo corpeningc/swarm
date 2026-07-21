@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/corpeningc/swarm/internal/execx"
 )
 
 // ErrWorktreePathExists is returned by Create when the target path already
@@ -42,7 +43,7 @@ func resolvePath(p string) string {
 // if it can't be determined (detached HEAD, or an orphan path git no longer
 // tracks). Best-effort; callers treat "" as "unknown".
 func CurrentBranch(ctx context.Context, path string) string {
-	out, err := exec.CommandContext(ctx, "git", "-C", path,
+	out, err := execx.Command(ctx, "git", "-C", path,
 		"rev-parse", "--abbrev-ref", "HEAD").Output()
 	if err != nil {
 		return ""
@@ -72,11 +73,11 @@ func (g *GitManager) Create(ctx context.Context, repoRoot, baseRef, id, relPath,
 	}
 	// Create the worktree on a fresh branch so git operations in the Shell
 	// tab work against a real, pushable branch rather than a detached HEAD.
-	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot,
+	out, err := execx.Command(ctx, "git", "-C", repoRoot,
 		"worktree", "add", "-b", branch, path, baseRef).CombinedOutput()
 	if err != nil && strings.Contains(string(out), "already exists") {
 		// Branch lingered from a prior run — attach a worktree to it instead.
-		out, err = exec.CommandContext(ctx, "git", "-C", repoRoot,
+		out, err = execx.Command(ctx, "git", "-C", repoRoot,
 			"worktree", "add", path, branch).CombinedOutput()
 	}
 	if err != nil {
@@ -97,10 +98,10 @@ func (g *GitManager) Destroy(ctx context.Context, w *Worktree, deleteBranch bool
 	}
 	defer func() {
 		if deleteBranch && branch != "" {
-			_ = exec.CommandContext(ctx, "git", "-C", w.RepoRoot, "branch", "-D", branch).Run()
+			_ = execx.Command(ctx, "git", "-C", w.RepoRoot, "branch", "-D", branch).Run()
 		}
 	}()
-	out, err := exec.CommandContext(ctx, "git", "-C", w.RepoRoot,
+	out, err := execx.Command(ctx, "git", "-C", w.RepoRoot,
 		"worktree", "remove", "--force", w.Path).CombinedOutput()
 	if err != nil {
 		// Git refuses when the path is no longer a registered working tree —
@@ -117,7 +118,7 @@ func (g *GitManager) Destroy(ctx context.Context, w *Worktree, deleteBranch bool
 	// RemoveAll fallback leaves <repo>/.git/worktrees/<id> behind — and a
 	// stale admin entry is exactly what makes a later create at this path fail
 	// with "is not a working tree". Best-effort: a prune failure isn't fatal.
-	_ = exec.CommandContext(ctx, "git", "-C", w.RepoRoot, "worktree", "prune").Run()
+	_ = execx.Command(ctx, "git", "-C", w.RepoRoot, "worktree", "prune").Run()
 	// Nested worktrees (e.g. h/1234) can leave an empty parent dir behind;
 	// sweep those up to the worktrees root so `git branch` namespaces don't
 	// litter the tree with empty directories.
@@ -206,7 +207,7 @@ func forceRemoveAll(path string) error {
 
 func (g *GitManager) List(ctx context.Context, repoRoot string) ([]*Worktree, error) {
 	repoRoot = resolvePath(repoRoot)
-	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot,
+	out, err := execx.Command(ctx, "git", "-C", repoRoot,
 		"worktree", "list", "--porcelain").Output()
 	if err != nil {
 		return nil, fmt.Errorf("git worktree list: %w", err)
@@ -215,7 +216,7 @@ func (g *GitManager) List(ctx context.Context, repoRoot string) ([]*Worktree, er
 }
 
 func (g *GitManager) ResolvePR(ctx context.Context, repoRoot string, prNumber int) (string, error) {
-	cmd := exec.CommandContext(ctx, "gh", "pr", "view",
+	cmd := execx.Command(ctx, "gh", "pr", "view",
 		fmt.Sprint(prNumber), "--json", "headRefOid", "-q", ".headRefOid")
 	cmd.Dir = repoRoot
 	out, err := cmd.Output()

@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/corpeningc/swarm/internal/execx"
 )
 
 // setupHookTimeout bounds how long a fresh-worktree setup script may run.
@@ -28,7 +30,7 @@ func RunSetupHook(repoRoot, worktreePath string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), setupHookTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, interp[0], append(interp[1:], name)...)
+	cmd := execx.Command(ctx, interp[0], append(interp[1:], name)...)
 	cmd.Dir = worktreePath
 	cmd.Env = append(os.Environ(),
 		"SWARM_REPO="+repoRoot,
@@ -76,7 +78,7 @@ var ErrDirtyTree = errors.New("repository has uncommitted changes")
 
 // FindRepoRoot resolves the enclosing git repository root from cwd.
 func FindRepoRoot(ctx context.Context, cwd string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel")
+	cmd := execx.Command(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel")
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("not inside a git repository: %w", err)
@@ -86,7 +88,7 @@ func FindRepoRoot(ctx context.Context, cwd string) (string, error) {
 
 // EnsureCleanTree returns ErrDirtyTree if there are uncommitted changes.
 func EnsureCleanTree(ctx context.Context, repoRoot string) error {
-	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot,
+	out, err := execx.Command(ctx, "git", "-C", repoRoot,
 		"status", "--porcelain").Output()
 	if err != nil {
 		return fmt.Errorf("git status: %w", err)

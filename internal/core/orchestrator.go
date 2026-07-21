@@ -13,7 +13,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -21,6 +20,7 @@ import (
 	"github.com/corpeningc/swarm/internal/agent"
 	"github.com/corpeningc/swarm/internal/agent/claudecode"
 	"github.com/corpeningc/swarm/internal/config"
+	"github.com/corpeningc/swarm/internal/execx"
 	"github.com/corpeningc/swarm/internal/memory"
 	"github.com/corpeningc/swarm/internal/session"
 	"github.com/corpeningc/swarm/internal/worktree"
@@ -395,7 +395,7 @@ func (o *Orchestrator) Diff(ctx context.Context, id string, colored bool) (strin
 		args = append(args, "--color=always")
 	}
 	args = append(args, baseRef)
-	out, err := exec.CommandContext(dctx, "git", args...).CombinedOutput()
+	out, err := execx.Command(dctx, "git", args...).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("diff: %s", strings.TrimSpace(string(out)))
 	}

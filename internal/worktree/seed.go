@@ -2,9 +2,10 @@ package worktree
 
 import (
 	"context"
-	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/corpeningc/swarm/internal/execx"
 )
 
 // SeedRef picks the ref a fresh worktree should branch from. When the main
@@ -26,17 +27,17 @@ func SeedRef(ctx context.Context, repoRoot string) string {
 	remote, remoteBranch, _ := strings.Cut(remoteRef, "/")
 	fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	_ = exec.CommandContext(fetchCtx, "git", "-C", repoRoot,
+	_ = execx.Command(fetchCtx, "git", "-C", repoRoot,
 		"fetch", "--quiet", remote, remoteBranch).Run()
 
 	// Seed from the remote only when it's strictly ahead: local must be an
 	// ancestor of the remote and the two must differ. Diverged histories keep
 	// local (the user's commits win); equal means the seed is identical anyway.
-	if exec.CommandContext(ctx, "git", "-C", repoRoot,
+	if execx.Command(ctx, "git", "-C", repoRoot,
 		"merge-base", "--is-ancestor", "HEAD", remoteRef).Run() != nil {
 		return "HEAD"
 	}
-	if exec.CommandContext(ctx, "git", "-C", repoRoot,
+	if execx.Command(ctx, "git", "-C", repoRoot,
 		"merge-base", "--is-ancestor", remoteRef, "HEAD").Run() == nil {
 		return "HEAD" // same commit
 	}
@@ -47,13 +48,13 @@ func SeedRef(ctx context.Context, repoRoot string) string {
 // upstream (e.g. "origin/main"), or "origin/<branch>" when that exists but no
 // upstream is set. "" when the branch has no remote counterpart.
 func remoteRefFor(ctx context.Context, repoRoot, branch string) string {
-	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot,
+	out, err := execx.Command(ctx, "git", "-C", repoRoot,
 		"rev-parse", "--abbrev-ref", branch+"@{upstream}").Output()
 	if err == nil {
 		return strings.TrimSpace(string(out))
 	}
 	ref := "origin/" + branch
-	if exec.CommandContext(ctx, "git", "-C", repoRoot,
+	if execx.Command(ctx, "git", "-C", repoRoot,
 		"rev-parse", "--verify", "--quiet", "refs/remotes/"+ref).Run() == nil {
 		return ref
 	}

@@ -2,8 +2,9 @@ package core
 
 import (
 	"context"
-	"os/exec"
 	"strings"
+
+	"github.com/corpeningc/swarm/internal/execx"
 )
 
 // sessionSlugSegments lowercases a label and splits it into sanitized path
@@ -92,10 +93,10 @@ func reconcileLegacyBranch(ctx context.Context, path, current, want string) bool
 	if want == "" || want == current || !strings.HasPrefix(current, "swarm/") {
 		return false
 	}
-	if exec.CommandContext(ctx, "git", "-C", path,
+	if execx.Command(ctx, "git", "-C", path,
 		"rev-parse", "--verify", "--quiet", "refs/heads/"+want).Run() == nil {
 		return false
 	}
-	return exec.CommandContext(ctx, "git", "-C", path,
+	return execx.Command(ctx, "git", "-C", path,
 		"branch", "-m", current, want).Run() == nil
 }
