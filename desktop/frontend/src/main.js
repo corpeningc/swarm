@@ -38,6 +38,34 @@ const TERM_OPTS = {
   },
 };
 
+// Claude Code reads the OS clipboard itself for image pastes, triggered by
+// Alt+V on Windows and Ctrl+V elsewhere.
+const IMAGE_PASTE_CHORD = navigator.platform?.startsWith("Win") ? "\x1bv" : "\x16";
+
+// wirePaste makes Ctrl(+Shift)+V work inside a terminal. The WebView2 host
+// never delivers the native paste event to xterm's hidden textarea, so we
+// intercept the chord and paste manually: clipboard text goes through
+// term.paste() (which applies bracketed-paste wrapping); no text means an
+// image is likely on the clipboard, so forward the agent's image-paste chord
+// and let it read the clipboard natively.
+function wirePaste(term, send) {
+  const doPaste = async () => {
+    let text = "";
+    try { text = (await wails?.ClipboardGetText()) || ""; } catch (_) {}
+    if (!text) { try { text = (await navigator.clipboard.readText()) || ""; } catch (_) {} }
+    if (text) term.paste(text);
+    else send(IMAGE_PASTE_CHORD);
+  };
+  term.attachCustomKeyEventHandler((ev) => {
+    if (ev.type === "keydown" && ev.ctrlKey && !ev.altKey && (ev.key === "v" || ev.key === "V")) {
+      ev.preventDefault();
+      doPaste();
+      return false;
+    }
+    return true;
+  });
+}
+
 function ensureTerm(id) {
   let entry = terms.get(id);
   if (entry) return entry;
@@ -71,6 +99,7 @@ function ensureTerm(id) {
   term.open(termEl);
   // Keystrokes / paste flow back to the agent PTY.
   term.onData((d) => App?.SendInput(id, d));
+  wirePaste(term, (d) => App?.SendInput(id, d));
 
   entry = { term, fit, pane, termEl };
   terms.set(id, entry);
@@ -375,6 +404,7 @@ function ensureShellTerm(id) {
   term.loadAddon(fit);
   term.open(shellHost);
   term.onData((d) => App?.SendShellInput(id, d));
+  wirePaste(term, (d) => App?.SendShellInput(id, d));
   entry = { term, fit };
   shellTerms.set(id, entry);
   return entry;

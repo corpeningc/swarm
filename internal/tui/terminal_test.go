@@ -177,3 +177,29 @@ func TestSessionTerminal_AltScreenSurvivesSwap(t *testing.T) {
 		t.Errorf("alt-screen content leaked into main-screen render; got %q", got)
 	}
 }
+
+func TestBracketedPasteTracking(t *testing.T) {
+	term := NewSessionTerminal(80, 24)
+	if term.BracketedPaste() {
+		t.Fatal("bracketed paste should start disabled")
+	}
+	term.Feed([]byte("boot noise \x1b[?2004h more output"))
+	if !term.BracketedPaste() {
+		t.Fatal("2004h should enable bracketed paste")
+	}
+	term.Feed([]byte("\x1b[?2004l"))
+	if term.BracketedPaste() {
+		t.Fatal("2004l should disable bracketed paste")
+	}
+	// Sequence split across two reads must still be detected.
+	term.Feed([]byte("x\x1b[?20"))
+	term.Feed([]byte("04h"))
+	if !term.BracketedPaste() {
+		t.Fatal("split 2004h should enable bracketed paste")
+	}
+	// Last mode change in a chunk wins.
+	term.Feed([]byte("\x1b[?2004l\x1b[?2004h"))
+	if !term.BracketedPaste() {
+		t.Fatal("later 2004h should win over earlier 2004l")
+	}
+}

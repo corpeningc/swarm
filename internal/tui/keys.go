@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -36,12 +37,28 @@ func encodeWheel(up bool, sgr bool, x, y int) []byte {
 	return []byte{0x1b, '[', 'M', clamp(cb), clamp(x), clamp(y)}
 }
 
+// encodePaste turns pasted text into the bytes a real terminal would send.
+// Newlines are normalized to CR (what terminals emit for Enter). When the
+// target program has bracketed paste enabled (DECSET 2004), the content is
+// wrapped in the paste markers — without them a multi-line paste reads as
+// typed input and every CR submits the line (Claude Code's prompt would
+// fire once per pasted line instead of receiving one paste).
+func encodePaste(runes []rune, bracketed bool) []byte {
+	s := strings.ReplaceAll(string(runes), "\r\n", "\r")
+	s = strings.ReplaceAll(s, "\n", "\r")
+	if bracketed {
+		return []byte("\x1b[200~" + s + "\x1b[201~")
+	}
+	return []byte(s)
+}
+
 // encodeKey translates a Bubbletea KeyMsg into the bytes a TTY-attached
 // program would have read had the user typed the key directly. Used by
 // attach mode to forward every keystroke to the focused agent's PTY.
 //
-// Not exhaustive — function keys, exotic Ctrl combos, and bracketed paste
-// aren't handled. Covers what people actually press inside agent TUIs.
+// Not exhaustive — function keys and exotic Ctrl combos aren't handled.
+// Covers what people actually press inside agent TUIs. Paste events are
+// handled separately via encodePaste.
 func encodeKey(k tea.KeyMsg) []byte {
 	if k.Type == tea.KeyRunes {
 		b := []byte(string(k.Runes))

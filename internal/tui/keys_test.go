@@ -50,6 +50,28 @@ func TestEncodeKey_Specials(t *testing.T) {
 	}
 }
 
+func TestEncodePaste(t *testing.T) {
+	cases := []struct {
+		name      string
+		in        string
+		bracketed bool
+		want      string
+	}{
+		{"bracketed wraps and normalizes CRLF", "one\r\ntwo", true, "\x1b[200~one\rtwo\x1b[201~"},
+		{"bracketed normalizes bare LF", "one\ntwo", true, "\x1b[200~one\rtwo\x1b[201~"},
+		{"plain paste stays unwrapped", "one\ntwo", false, "one\rtwo"},
+		{"single line bracketed", "hello", true, "\x1b[200~hello\x1b[201~"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := encodePaste([]rune(tc.in), tc.bracketed)
+			if !bytes.Equal(got, []byte(tc.want)) {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEncodeKey_CtrlQReserved(t *testing.T) {
 	// Ctrl+Q is the detach key; encoder must return nil so a stray pass
 	// to encodeKey can't accidentally forward it to the agent.

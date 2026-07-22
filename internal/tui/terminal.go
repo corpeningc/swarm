@@ -39,6 +39,14 @@ type SessionTerminal struct {
 	state      *terminal.State
 	vt         *terminal.VT
 	cols, rows int
+
+	// bracketedPaste mirrors DEC private mode 2004, tracked here because the
+	// underlying emulator ignores it. When the child program has it enabled,
+	// forwarded pastes must be wrapped in \e[200~ … \e[201~ (see encodePaste).
+	bracketedPaste bool
+	// modeCarry holds the tail of the previous Feed chunk so a 2004h/l
+	// sequence split across two PTY reads is still detected.
+	modeCarry []byte
 }
 
 // NewSessionTerminal constructs a virtual terminal sized to (cols, rows),
@@ -69,6 +77,7 @@ func (t *SessionTerminal) Feed(b []byte) {
 	if len(b) == 0 {
 		return
 	}
+	t.scanPasteMode(b)
 	b = privateCSIPattern.ReplaceAll(b, nil)
 	b = downsampleTrueColor(b)
 	_, _ = t.vt.Write(b)
@@ -312,6 +321,33 @@ func bgCode(c terminal.Color) string {
 func (t *SessionTerminal) Size() (cols, rows int) {
 	return t.cols, t.rows
 }
+
+// pasteModeOn/Off are DECSET/DECRST for bracketed paste (mode 2004).
+var (
+	pasteModeOn  = []byte("\x1b[?2004h")
+	pasteModeOff = []byte("\x1b[?2004l")
+)
+
+// scanPasteMode watches the output stream for bracketed-paste mode changes.
+// A short tail from the previous chunk is prepended so a sequence split
+// across reads still matches; the tail is one byte shorter than a full
+// sequence, so a match can never be counted twice.
+func (t *SessionTerminal) scanPasteMode(b []byte) {
+	buf := b
+	if len(t.modeCarry) > 0 {
+		buf = append(append([]byte{}, t.modeCarry...), b...)
+	}
+	on, off := bytes.LastIndex(buf, pasteModeOn), bytes.LastIndex(buf, pasteModeOff)
+	if on >= 0 || off >= 0 {
+		t.bracketedPaste = on > off
+	}
+	keep := min(len(pasteModeOn)-1, len(buf))
+	t.modeCarry = append(t.modeCarry[:0], buf[len(buf)-keep:]...)
+}
+
+// BracketedPaste reports whether the child program has enabled bracketed
+// paste (DECSET 2004), i.e. whether forwarded pastes should be wrapped.
+func (t *SessionTerminal) BracketedPaste() bool { return t.bracketedPaste }
 
 // MouseMode reports whether the program running in this terminal has asked
 // for mouse reporting, and whether it wants SGR (1006) encoding. Used to

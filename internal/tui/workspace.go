@@ -746,20 +746,29 @@ func (w Workspace) handleAttachedKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		w.mode = ModeIdle
 		return w, nil
 	}
-	bytes := encodeKey(k)
-	if len(bytes) == 0 {
-		return w, nil
-	}
 	if w.focused == "" {
 		w.mode = ModeIdle
 		return w, nil
 	}
 	// Route to the shell when the Shell tab is active, else to the agent.
 	var target agent.Agent
+	var term *SessionTerminal
 	if w.viewMode == ViewShell {
-		target = w.shells[w.focused]
+		target, term = w.shells[w.focused], w.shellTerminals[w.focused]
 	} else if h, ok := w.deps.Registry.Get(w.focused); ok {
-		target = h.Agent
+		target, term = h.Agent, w.terminals[w.focused]
+	}
+	var bytes []byte
+	if k.Paste && k.Type == tea.KeyRunes {
+		// Pasted text needs its bracketed-paste markers restored — bubbletea
+		// strips them on the way in, and the child program (which enabled
+		// mode 2004) needs them to treat this as a paste, not typed keys.
+		bytes = encodePaste(k.Runes, term != nil && term.BracketedPaste())
+	} else {
+		bytes = encodeKey(k)
+	}
+	if len(bytes) == 0 {
+		return w, nil
 	}
 	if target == nil {
 		// Nothing live to send to (e.g. shell still spawning, or a restored
