@@ -1,0 +1,141 @@
+name: release
+
+# Tag a version to ship it:  git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (no leading v), e.g. 0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  WAILS_VERSION: v2.10.2
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows/amd64
+          - os: macos-latest
+            platform: darwin/universal
+          - os: ubuntu-latest
+            platform: linux/amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Resolve version
+        id: v
+        run: |
+          v="${{ inputs.version }}"
+          [ -n "$v" ] || v="${GITHUB_REF_NAME#v}"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Linux build deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+
+      # Stamps the version into the binary's file properties and, on Windows,
+      # into the installer + Add/Remove Programs entry.
+      - name: Stamp version into wails.json
+        run: |
+          cd desktop
+          jq --arg v "${{ steps.v.outputs.version }}" \
+            '.info.productVersion = $v' wails.json > wails.json.tmp
+          mv wails.json.tmp wails.json
+
+      - name: Build (Windows installer)
+        if: matrix.os == 'windows-latest'
+        run: cd desktop && wails build -platform windows/amd64 -nsis -trimpath -clean
+
+      - name: Build (macOS)
+        if: matrix.os == 'macos-latest'
+        run: cd desktop && wails build -platform darwin/universal -trimpath -clean
+
+      - name: Build (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: cd desktop && wails build -platform linux/amd64 -tags webkit2_41 -trimpath -clean
+
+      - name: Package
+        id: pkg
+        run: |
+          set -euo pipefail
+          v="${{ steps.v.outputs.version }}"
+          mkdir -p dist
+          cd desktop/build/bin
+          case "${{ matrix.os }}" in
+            windows-latest)
+              mv swarm-amd64-installer.exe "../../../dist/swarm-desktop-$v-windows-amd64-setup.exe"
+              7z a "../../../dist/swarm-desktop-$v-windows-amd64.zip" swarm-desktop.exe
+              ;;
+            macos-latest)
+              app=$(ls -d *.app | head -1)
+              ditto -c -k --keepParent "$app" "../../../dist/swarm-desktop-$v-macos-universal.zip"
+              ;;
+            ubuntu-latest)
+              tar czf "../../../dist/swarm-desktop-$v-linux-amd64.tar.gz" swarm-desktop
+              ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd artifacts && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          body: |
+            ## Install the desktop app
+
+            **Windows** — download `…-windows-amd64-setup.exe` and run it, or:
+            ```powershell
+            irm https://raw.githubusercontent.com/corpeningc/swarm/main/scripts/install.ps1 | iex
+            ```
+
+            **macOS / Linux**:
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/corpeningc/swarm/main/scripts/install.sh | sh
+            ```
+
+            The builds are unsigned — see the README for the one-time
+            SmartScreen / Gatekeeper prompt.

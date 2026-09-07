@@ -7,8 +7,13 @@
   "frontend:dir": "frontend",
   "wailsjsdir": "./frontend/wailsjs",
   "info": {
+    "companyName": "Swarm",
     "productName": "swarm",
+    "productVersion": "0.0.0",
+    "copyright": "© Caleb Corpening",
     "comments": "Run multiple AI coding agents in parallel — desktop edition."
   },
-  "author": {}
+  "author": {
+    "name": "Caleb Corpening"
+  }
 }

@@ -40,24 +40,76 @@ What's different:
 
 ## Install
 
-Requires Go 1.25+, `git`, `claude` (Claude Code CLI). Optional: `gh` for PR-resolution flows.
+Both frontends need `git` and the [`claude`](https://claude.com/claude-code) CLI
+on your `PATH` at runtime. Optional: `gh` for PR-resolution flows.
+
+### Desktop app (recommended)
+
+The GUI is the easiest way in — buttons and a modal instead of memorized
+keybindings, plus a tiled grid of every live agent. Prebuilt, no toolchain
+required: grab it from the [latest release](https://github.com/corpeningc/swarm/releases/latest).
+
+| Platform | Get it |
+|---|---|
+| **Windows** | Download `swarm-desktop-<version>-windows-amd64-setup.exe` and run it. Installs WebView2 if missing, adds Start Menu + Desktop shortcuts, and registers an uninstaller. |
+| **macOS** | Download `swarm-desktop-<version>-macos-universal.zip`, unzip, drag `swarm-desktop.app` to Applications. |
+| **Linux** | Download `swarm-desktop-<version>-linux-amd64.tar.gz` and extract. Needs `libwebkit2gtk-4.1` and `libgtk-3`. |
+
+Or one line:
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/corpeningc/swarm/main/scripts/install.ps1 | iex
+```
+
+```sh
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/corpeningc/swarm/main/scripts/install.sh | sh
+```
+
+The scripts fetch the latest release, install it (Applications on macOS,
+`~/.local/bin` plus a launcher entry on Linux), and clear the quarantine flag on
+macOS. Pin a version with `-Version 0.1.0` / `SWARM_VERSION=0.1.0`.
+
+> **The builds are unsigned.** Windows SmartScreen shows "Windows protected your
+> PC" — click **More info → Run anyway**. macOS says the app "cannot be opened":
+> right-click → **Open**, or run `xattr -dr com.apple.quarantine
+> /Applications/swarm-desktop.app` (the install script does this for you).
+
+### Terminal UI
+
+Requires Go 1.25+.
 
 ```sh
 go install github.com/corpeningc/swarm/cmd/swarm@latest
 ```
 
-Or build from source:
+Make sure `$GOBIN` (default `~/go/bin`) is on your `PATH`.
+
+### From source
 
 ```sh
 git clone https://github.com/corpeningc/swarm
 cd swarm
-go build -o swarm ./cmd/swarm
+
+go build -o swarm ./cmd/swarm   # terminal UI
 ./swarm
+
+cd desktop && wails build       # desktop app -> build/bin/swarm-desktop
 ```
 
-Make sure `$GOBIN` (default `~/go/bin`) is on your `PATH`.
+Building the desktop app additionally needs Node 18+ and the
+[Wails CLI](https://wails.io/docs/gettingstarted/installation); see
+[desktop/README.md](desktop/README.md).
 
 ## Quick start
+
+**Desktop app:** launch it from the Start Menu / Applications, click **New
+session**, and pick your repo with **Browse…** — or launch it from inside a repo
+(`swarm-desktop` in a project directory) and that repo becomes the default. From
+there the keys below apply, plus **▦ Grid** to tile every live agent at once.
+
+**Terminal UI:**
 
 ```sh
 cd ~/your-project
