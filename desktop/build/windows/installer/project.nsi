@@ -94,7 +94,7 @@ Function .onInit
    Pop $0
    Pop $1
    ${If} $0 == 0
-      MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION /SD IDOK "${INFO_PRODUCTNAME} is running and must be closed to continue.$\n$\nAny agent sessions it is running will be terminated." IDOK closeRunning
+      MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "${INFO_PRODUCTNAME} is running and must be closed to continue.$\n$\nAny agent sessions it is running will be terminated." /SD IDOK IDOK closeRunning
       Abort
       closeRunning:
       nsExec::Exec 'taskkill /F /IM "${PRODUCT_EXECUTABLE}" /T'
