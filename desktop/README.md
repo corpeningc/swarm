@@ -75,8 +75,25 @@ routes every keystroke to the focused agent.
 | `x` | kill agent (keep worktree) |
 | `d` | discard session + worktree |
 | `g` | toggle the grid of all live agents |
-| `Tab` | cycle Terminal → Diff → Shell |
-| `1` / `2` / `3` | jump to Terminal / Diff / Shell |
+| `Tab` | cycle Agent → Diff → Shell |
+| `1` / `2` / `3` | jump to Agent / Diff / Shell |
+| `Ctrl` + `+` / `-` / `0` | scale the terminal text (remembered per machine) |
 
 Clicking a terminal in single-pane view also attaches; in grid view a click
-only selects, so you can click around without hijacking the keyboard.
+only selects, so you can click around without hijacking the keyboard. `Enter`
+attaches to whatever the current tab shows — the Agent tab to the agent, the
+Shell tab to that session's shell.
+
+## New session
+
+The modal picks three things beyond the repo and the first prompt:
+
+- **Workspace** — *New worktree* (the default: an isolated checkout on its own
+  branch), *Main working tree* (run in the repository itself, on the branch
+  that's checked out — no worktree, and discard never deletes anything), or an
+  existing swarm worktree, which reattaches to it and its branch.
+- **Continue conversation** — appears when the chosen workspace has agent
+  history. Picking one resumes that conversation (`claude --resume`) instead of
+  starting fresh. Conversations are recorded per working directory, so the list
+  follows the workspace choice; one a running session already owns is hidden.
+- **Agent** and whether to boot global MCP servers.

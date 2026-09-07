@@ -26,7 +26,7 @@ What's different:
 
 ## What it does
 
-- **Spawn agents in isolated git worktrees.** Each session gets its own working tree under `.swarm/worktrees/<name>/`, so multiple agents can edit the same repo in parallel without stepping on each other.
+- **Spawn agents in isolated git worktrees.** Each session gets its own working tree under `.swarm/worktrees/<name>/`, so multiple agents can edit the same repo in parallel without stepping on each other. Or don't: the desktop app can also run a session in the repository's own working tree, on the branch you already have checked out.
 - **Multi-repo from one window.** Sessions across different repositories show up in the same sidebar. Swap focus with `j`/`k`.
 - **Attach / detach** any session. Press Enter to attach (your keystrokes go to the agent), Ctrl+Q to detach. Sessions keep running in the background while you work on others.
 - **Attention routing.** The sidebar floats ◆ awaiting (yellow) sessions to the top, the window title shows how many need you, and a bell rings when one transitions — powered by Claude's `Stop` / `Notification` hooks, so you don't have to babysit the screen. A long silence heuristic is the fallback when hooks don't fire.
@@ -106,8 +106,12 @@ Building the desktop app additionally needs Node 18+ and the
 
 **Desktop app:** launch it from the Start Menu / Applications, click **New
 session**, and pick your repo with **Browse…** — or launch it from inside a repo
-(`swarm-desktop` in a project directory) and that repo becomes the default. From
-there the keys below apply, plus **▦ Grid** to tile every live agent at once.
+(`swarm-desktop` in a project directory) and that repo becomes the default. The
+modal's **Workspace** picker chooses where the agent runs (a fresh worktree, the
+repo itself, or an existing worktree), and when that workspace has agent history
+you can **continue an earlier conversation** instead of starting cold. From
+there the keys below apply, plus **▦ Grid** to tile every live agent at once and
+`Ctrl` `+`/`-` to scale the terminal text.
 
 **Terminal UI:**
 

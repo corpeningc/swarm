@@ -81,13 +81,35 @@ func (g *GitManager) Create(ctx context.Context, repoRoot, baseRef, id, relPath,
 			"worktree", "add", path, branch).CombinedOutput()
 	}
 	if err != nil {
+		// A cancelled context kills git mid-checkout; on Windows that reads as
+		// a plain "exit status 1" over git's progress output, which tells the
+		// user nothing. Name the real cause.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("git worktree add %s %s: %w — the first checkout of a large repo can take several minutes",
+				path, baseRef, ctxErr)
+		}
 		return nil, fmt.Errorf("git worktree add %s %s: %w: %s",
 			path, baseRef, err, strings.TrimSpace(string(out)))
 	}
 	return &Worktree{ID: id, Path: path, BaseRef: baseRef, Branch: branch, RepoRoot: repoRoot}, nil
 }
 
+// IsMainWorktree reports whether w points at the repository itself rather than
+// a swarm-managed worktree — the shape an in-place session has.
+func IsMainWorktree(w *Worktree) bool {
+	if w == nil || w.Path == "" || w.RepoRoot == "" {
+		return false
+	}
+	return resolvePath(w.Path) == resolvePath(w.RepoRoot)
+}
+
 func (g *GitManager) Destroy(ctx context.Context, w *Worktree, deleteBranch bool) error {
+	// Never destroy the repository's own working tree. `git worktree remove`
+	// refuses it, which would drop us into the RemoveAll fallback below and
+	// delete the user's entire repo.
+	if IsMainWorktree(w) {
+		return fmt.Errorf("refusing to remove %s: that is the repository's main working tree", w.Path)
+	}
 	// Best-effort branch deletion, when requested. Resolved first because
 	// `worktree remove` frees the branch for deletion. When Branch isn't
 	// populated (e.g. prune constructs a bare Worktree), read it from git

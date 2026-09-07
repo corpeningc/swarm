@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -9,8 +11,10 @@ import (
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/corpeningc/swarm/internal/agent"
+	"github.com/corpeningc/swarm/internal/agent/claudecode"
 	"github.com/corpeningc/swarm/internal/core"
 	"github.com/corpeningc/swarm/internal/session"
+	"github.com/corpeningc/swarm/internal/worktree"
 )
 
 // App is the Wails-bound surface. Every exported method becomes callable from
@@ -92,7 +96,8 @@ type SessionDTO struct {
 	Branch    string `json:"branch"`
 	AgentName string `json:"agentName"`
 	Status    string `json:"status"`
-	Live      bool   `json:"live"` // false for restored sessions (agent process gone)
+	Live      bool   `json:"live"`    // false for restored sessions (agent process gone)
+	InPlace   bool   `json:"inPlace"` // runs in the repo's own working tree, not a worktree
 }
 
 func toDTO(h *session.Handle) SessionDTO {
@@ -108,6 +113,7 @@ func toDTO(h *session.Handle) SessionDTO {
 		Repo:      h.Session.RepoRoot,
 		Branch:    branch,
 		AgentName: h.Session.AgentName,
+		InPlace:   h.Session.InPlace,
 		Status:    h.Session.Status.String(),
 		Live:      h.Agent != nil,
 	}
@@ -129,10 +135,108 @@ func (a *App) AgentNames() []string { return a.orch.AgentNames() }
 // DefaultRepo returns the repo swarm was launched in (may be "").
 func (a *App) DefaultRepo() string { return a.orch.DefaultRepo() }
 
+// mainWorkspace is the Workspaces/Conversations value standing for the
+// repository's own working tree, as opposed to a swarm worktree slug ("" means
+// "make a new worktree", which has no directory yet).
+const mainWorkspace = "@main"
+
+// WorkspaceDTO is one choice in the new-session workspace picker.
+type WorkspaceDTO struct {
+	Value string `json:"value"` // "" new worktree, "@main" the repo, else a worktree slug
+	Label string `json:"label"`
+	Path  string `json:"path"`
+	InUse bool   `json:"inUse"` // a running session already owns it
+}
+
+// ConversationDTO is one resumable agent conversation recorded in a workspace.
+// UpdatedAt is RFC3339 rather than a time.Time so the generated bindings stay
+// plain JSON the frontend can hand straight to Date.
+type ConversationDTO struct {
+	ID        string `json:"id"`
+	Summary   string `json:"summary"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
+// workspacePath resolves a picker value to the directory a session would run
+// in. Empty for "new worktree" — that directory doesn't exist yet.
+func workspacePath(repo, workspace string) string {
+	switch {
+	case repo == "" || workspace == "":
+		return ""
+	case workspace == mainWorkspace:
+		return repo
+	default:
+		return filepath.Join(worktree.SwarmWorktreesDir(repo), filepath.FromSlash(workspace))
+	}
+}
+
+// Workspaces lists where a new session can run in repo: a fresh worktree, the
+// repository itself, or any worktree swarm already created there.
+func (a *App) Workspaces(repo string) []WorkspaceDTO {
+	if repo == "" {
+		return nil
+	}
+	if _, err := os.Stat(repo); err != nil {
+		return nil
+	}
+	// A worktree a running session already owns can't take a second one, so
+	// the picker marks it rather than letting the spawn fail.
+	busy := make(map[string]bool)
+	for _, h := range a.orch.Registry().List() {
+		if h.Agent != nil && h.Worktree != nil {
+			busy[strings.ToLower(filepath.Clean(h.Worktree.Path))] = true
+		}
+	}
+	inUse := func(path string) bool { return busy[strings.ToLower(filepath.Clean(path))] }
+
+	out := []WorkspaceDTO{{
+		Value: mainWorkspace, Label: "Main working tree", Path: repo, InUse: inUse(repo),
+	}}
+	for _, rel := range worktree.SwarmWorktreeRelPaths(repo) {
+		path := workspacePath(repo, rel)
+		out = append(out, WorkspaceDTO{Value: rel, Label: rel, Path: path, InUse: inUse(path)})
+	}
+	return out
+}
+
+// Conversations lists the agent conversations recorded in a workspace, newest
+// first, so a new session can pick up where one left off. Conversations owned
+// by a running session are left out — resuming one twice forks it. Empty for a
+// brand-new worktree, which has no history yet.
+func (a *App) Conversations(repo, workspace string) []ConversationDTO {
+	path := workspacePath(repo, workspace)
+	if path == "" {
+		return nil
+	}
+	busy := make(map[string]bool)
+	for _, h := range a.orch.Registry().List() {
+		if h.Agent != nil && h.Session.ClaudeSessionID != "" {
+			busy[h.Session.ClaudeSessionID] = true
+		}
+	}
+	var out []ConversationDTO
+	for _, c := range claudecode.Conversations(path) {
+		if busy[c.ID] {
+			continue
+		}
+		out = append(out, ConversationDTO{
+			ID: c.ID, Summary: c.Summary, UpdatedAt: c.UpdatedAt.Format(time.RFC3339),
+		})
+	}
+	return out
+}
+
 // SpawnSession creates a new session and begins streaming its output.
-func (a *App) SpawnSession(repo, prompt, name, agentName string, enableMCP bool) (*SessionDTO, error) {
+// workspace is a Workspaces value; resumeID continues a Conversations entry.
+func (a *App) SpawnSession(repo, prompt, name, agentName, workspace, resumeID string, enableMCP bool) (*SessionDTO, error) {
+	// An existing worktree is addressed by its slug, which is also the session
+	// name the orchestrator reattaches by.
+	if workspace != "" && workspace != mainWorkspace {
+		name = workspace
+	}
 	h, err := a.orch.Spawn(a.ctx, core.SpawnRequest{
-		Repo: repo, Prompt: prompt, Name: name, AgentName: agentName, EnableMCP: enableMCP,
+		Repo: repo, Prompt: prompt, Name: name, AgentName: agentName,
+		EnableMCP: enableMCP, InPlace: workspace == mainWorkspace, ResumeID: resumeID,
 	})
 	if err != nil {
 		return nil, err

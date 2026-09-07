@@ -78,6 +78,15 @@ type SpawnRequest struct {
 	Name      string // optional user label; drives the branch and worktree dir
 	AgentName string // claude, codex, aider; empty uses the default
 	EnableMCP bool   // off by default — booting global MCP servers is the dominant startup cost
+	// ResumeID, when set, continues an existing agent conversation instead of
+	// starting a fresh one. Only meaningful for the worktree the conversation
+	// was recorded in — agents key their history by working directory.
+	ResumeID string
+
+	// InPlace runs the agent in the repository's own working tree on whatever
+	// branch is checked out — no `git worktree add`, no new branch. Off by
+	// default: isolation is the point of swarm, this is the opt-out.
+	InPlace bool
 }
 
 // isolatedWorktreeGuidance is appended to the spawned agent's system prompt so
@@ -86,9 +95,18 @@ type SpawnRequest struct {
 const isolatedWorktreeGuidance = "You are already running inside an isolated git worktree managed by swarm. " +
 	"Work directly in the current directory. Do NOT create git worktrees or use worktree isolation for subagents."
 
-// spawnTimeout bounds worktree creation + setup hook. The agent process itself
-// keeps running past this — the timeout only covers the synchronous setup.
-const spawnTimeout = 30 * time.Second
+// inPlaceGuidance replaces isolatedWorktreeGuidance when the session runs in
+// the repository's own working tree. Nothing is isolated there, so the agent
+// must not treat the tree as disposable.
+const inPlaceGuidance = "You are running directly in the repository's main working tree, not an isolated worktree. " +
+	"Other work may be in progress here. Do NOT create git worktrees, switch branches, or discard uncommitted changes unless asked."
+
+// worktreeTimeout bounds `git worktree add`. It has to be generous: the first
+// checkout of a large repo is thousands of files, and on Windows that runs
+// minutes, not seconds. Too tight a bound kills git mid-checkout and surfaces
+// as a bare "exit status 1". The setup hook is bounded separately by
+// worktree.setupHookTimeout, and the agent process keeps running past both.
+const worktreeTimeout = 10 * time.Minute
 
 // Spawn creates-or-attaches a worktree for the request, injects project memory
 // on a fresh conversation, launches the agent, and registers the session.
@@ -126,10 +144,22 @@ func (o *Orchestrator) Spawn(ctx context.Context, req SpawnRequest) (*session.Ha
 		}
 	}
 
-	setupCtx, cancel := context.WithTimeout(ctx, spawnTimeout)
+	// An explicitly picked conversation wins over whatever a reattached
+	// handle remembered.
+	if req.ResumeID != "" {
+		resumeID = req.ResumeID
+	}
+
+	setupCtx, cancel := context.WithTimeout(ctx, worktreeTimeout)
 	defer cancel()
 
-	wt, err := o.createOrAttachWorktree(setupCtx, req.Repo, dirName, relPath, branchName, existingPath)
+	var wt *worktree.Worktree
+	var err error
+	if req.InPlace {
+		wt, err = mainWorktree(setupCtx, req.Repo, dirName)
+	} else {
+		wt, err = o.createOrAttachWorktree(setupCtx, req.Repo, dirName, relPath, branchName, existingPath)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -161,6 +191,9 @@ func (o *Orchestrator) Spawn(ctx context.Context, req SpawnRequest) (*session.Ha
 		StrictMCP:          !req.EnableMCP,
 		AppendSystemPrompt: isolatedWorktreeGuidance,
 	}
+	if req.InPlace {
+		opts.AppendSystemPrompt = inPlaceGuidance
+	}
 	if os.Getenv("SWARM_DUMP_PTY") != "" {
 		dumpDir := filepath.Join(config.Home(), "dumps")
 		if mkErr := os.MkdirAll(dumpDir, 0755); mkErr == nil {
@@ -170,8 +203,9 @@ func (o *Orchestrator) Spawn(ctx context.Context, req SpawnRequest) (*session.Ha
 
 	if err := a.Spawn(context.Background(), opts); err != nil {
 		// Only clean up worktrees we just created (auto-id sessions); a reused
-		// worktree existed before we touched it.
-		if strings.HasPrefix(dirName, "sess-") {
+		// worktree existed before we touched it, and an in-place session's
+		// "worktree" is the user's repo.
+		if !req.InPlace && strings.HasPrefix(dirName, "sess-") {
 			_ = o.deps.Git.Destroy(context.Background(), wt, true)
 		}
 		return nil, fmt.Errorf("spawn: %w", err)
@@ -182,13 +216,30 @@ func (o *Orchestrator) Spawn(ctx context.Context, req SpawnRequest) (*session.Ha
 		Session: &session.Session{
 			ID: dirName, Name: req.Name, Nickname: nickname, RepoRoot: req.Repo, BaseRef: "HEAD",
 			Branch: wt.Branch, Worktree: wt.Path, AgentName: req.AgentName,
-			Prompt: req.Prompt, EnableMCP: req.EnableMCP, Status: session.StatusRunning,
+			Prompt: req.Prompt, EnableMCP: req.EnableMCP, InPlace: req.InPlace, Status: session.StatusRunning,
 			CreatedAt: now, UpdatedAt: now, ClaudeSessionID: resumeID, SortKey: sortKey,
 		},
 		Worktree: wt, Agent: a,
 	}
 	o.deps.Registry.Add(h)
 	return h, nil
+}
+
+// mainWorktree describes the repository's own working tree for an in-place
+// session: no `git worktree add`, no new branch, whatever is already checked
+// out. It is returned as a *worktree.Worktree so the rest of the pipeline
+// (shell, diff, resume) needs no special case; only Discard does.
+func mainWorktree(ctx context.Context, repo, id string) (*worktree.Worktree, error) {
+	if repo == "" {
+		return nil, fmt.Errorf("in-place session needs a repository")
+	}
+	if _, err := os.Stat(repo); err != nil {
+		return nil, fmt.Errorf("in-place session: %w", err)
+	}
+	return &worktree.Worktree{
+		ID: id, Path: repo, BaseRef: "HEAD",
+		Branch: worktree.CurrentBranch(ctx, repo), RepoRoot: repo,
+	}, nil
 }
 
 // createOrAttachWorktree reuses an existing worktree (by known path or by an
@@ -310,6 +361,13 @@ func (o *Orchestrator) Discard(ctx context.Context, id string, opts DiscardOpts)
 	h, ok := o.deps.Registry.Get(id)
 	if !ok {
 		return fmt.Errorf("discard: unknown session %q", id)
+	}
+	// An in-place session runs in the repo's own working tree on a branch the
+	// user already had. There is nothing of ours to remove, and removing it
+	// would delete their repository — drop both options rather than erroring,
+	// so discard still detaches the session cleanly.
+	if h.Session.InPlace {
+		opts.RemoveWorktree, opts.DeleteBranch = false, false
 	}
 	if opts.DeleteBranch && !opts.RemoveWorktree {
 		return fmt.Errorf("discard: deleting the branch requires deleting the worktree it's checked out in")

@@ -24,10 +24,32 @@ const shellHost = $("#shell-host");
 const termEmpty = $("#term-empty");
 const focusTitle = $("#focus-title");
 
+// ---- font scale ----
+// Ctrl +/- resizes every terminal, like a normal terminal emulator. The choice
+// is per-machine and outlives a restart.
+const FONT_MIN = 8, FONT_MAX = 32, FONT_DEFAULT = 13;
+let termFontSize = clampFont(Number(localStorage.getItem("swarm.fontSize")) || FONT_DEFAULT);
+
+function clampFont(px) {
+  return Number.isFinite(px) ? Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(px))) : FONT_DEFAULT;
+}
+
+function setFontSize(px) {
+  const next = clampFont(px);
+  if (next === termFontSize) return;
+  termFontSize = next;
+  TERM_OPTS.fontSize = next; // terminals created later inherit it
+  try { localStorage.setItem("swarm.fontSize", String(next)); } catch (_) {}
+  for (const map of [terms, shellTerms]) {
+    for (const entry of map.values()) entry.term.options.fontSize = next;
+  }
+  fitVisible(); // the cell grid changed, so every pane re-fits and resizes its PTY
+}
+
 // ---- terminal factory ----
 const TERM_OPTS = {
   fontFamily: '"Cascadia Code", "JetBrains Mono", Consolas, monospace',
-  fontSize: 13,
+  fontSize: termFontSize,
   cursorBlink: true,
   scrollback: 10000,
   theme: {
@@ -146,7 +168,7 @@ function renderSidebar() {
         <span class="dot ${s.status}"></span>
         <span class="label">${escapeHtml(s.label)}</span>
       </div>
-      <div class="meta">${escapeHtml(s.agentName || "claude")} · ${escapeHtml(s.branch || "")} ${s.live ? "" : "· (stopped)"}</div>`;
+      <div class="meta">${escapeHtml(s.agentName || "claude")} · ${escapeHtml(s.branch || "")}${s.inPlace ? ' <span class="tag">in-place</span>' : ""} ${s.live ? "" : "· (stopped)"}</div>`;
     if (s.id === renamingId) {
       const input = document.createElement("input");
       input.className = "rename-input";
@@ -310,10 +332,20 @@ function focusSession(id) {
   fitVisible();
 }
 
-// attach routes the keyboard to the focused session's agent. Resumes a stopped
-// session first. Mirrors the TUI's ModeAttached; Ctrl+Q detaches.
+// attach routes the keyboard to whatever the current tab shows: the Shell tab
+// attaches to that session's shell, every other tab to its agent (switching to
+// the Agent tab first). Resumes a stopped agent; a shell needs no agent, so
+// attaching to one never resumes. Mirrors the TUI's ModeAttached; Ctrl+Q detaches.
 function attach() {
   if (!focusedId) return;
+  if (view === "shell") {
+    openShell(focusedId);
+    attached = true;
+    document.body.classList.add("attached");
+    ensureShellTerm(focusedId).term.focus();
+    updateModeHint();
+    return;
+  }
   const s = sessions.find((x) => x.id === focusedId);
   const entry = ensureTerm(focusedId);
   if (s && !s.live) {
@@ -330,8 +362,10 @@ function attach() {
 function detach() {
   attached = false;
   document.body.classList.remove("attached");
-  const entry = terms.get(focusedId);
-  if (entry) entry.term.blur();
+  for (const map of [terms, shellTerms]) {
+    const entry = map.get(focusedId);
+    if (entry) entry.term.blur();
+  }
   if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   updateModeHint();
 }
@@ -339,11 +373,12 @@ function detach() {
 function updateModeHint() {
   const hint = $("#mode-hint");
   if (!focusedId) { hint.textContent = ""; hint.classList.remove("attached"); return; }
+  const target = view === "shell" ? " to shell" : "";
   if (attached) {
-    hint.textContent = "● attached — Ctrl+Q to detach";
+    hint.textContent = "● attached" + target + " — Ctrl+Q to detach";
     hint.classList.add("attached");
   } else {
-    hint.textContent = "navigation — ↵ to attach";
+    hint.textContent = "navigation — ↵ to attach" + target;
     hint.classList.remove("attached");
   }
 }
@@ -368,6 +403,13 @@ function setView(v) {
   $("#view-shell").classList.toggle("active", v === "shell");
   if (v === "diff" && focusedId) loadDiff(focusedId);
   if (v === "shell" && focusedId) openShell(focusedId);
+  // An attachment points at one pane, so changing tabs has to move it — or
+  // drop it, since the Diff tab has nothing to type into.
+  if (attached) {
+    if (v === "diff") detach();
+    else if (focusedId) (v === "shell" ? ensureShellTerm(focusedId) : ensureTerm(focusedId)).term.focus();
+  }
+  updateModeHint();
   fitVisible();
 }
 
@@ -403,6 +445,8 @@ function ensureShellTerm(id) {
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.open(shellHost);
+  // Clicking the shell pane attaches to it, matching the agent panes.
+  term.element?.addEventListener("mousedown", () => { focusSession(id); attach(); });
   term.onData((d) => App?.SendShellInput(id, d));
   wirePaste(term, (d) => App?.SendShellInput(id, d));
   entry = { term, fit };
@@ -453,6 +497,11 @@ function openDiscardModal() {
   $("#d-label").textContent = `Remove "${labelFor(focusedId)}" from the panel?`;
   $("#d-worktree").checked = false;
   $("#d-branch").checked = false;
+  // An in-place session's "worktree" is the repo itself — never offer to
+  // delete it (the backend refuses too).
+  const inPlace = !!sessions.find((x) => x.id === focusedId)?.inPlace;
+  $("#d-worktree-opts").classList.toggle("hidden", inPlace);
+  $("#d-inplace-note").classList.toggle("hidden", !inPlace);
   discardBackdrop.classList.remove("hidden");
   $("#d-confirm").focus();
 }
@@ -501,6 +550,8 @@ async function openModal() {
   $("#m-name").value = "";
   $("#m-prompt").value = "";
   $("#m-mcp").checked = false;
+  setModalBusy(false);
+  await refreshWorkspaces();
   const sel = $("#m-agent");
   sel.innerHTML = "";
   for (const name of (await App?.AgentNames()) || ["claude"]) {
@@ -512,25 +563,118 @@ async function openModal() {
   backdrop.classList.remove("hidden");
   $("#m-name").focus();
 }
-function closeModal() { backdrop.classList.add("hidden"); }
+// A spawn can take minutes (`git worktree add` on a big repo), so the form is
+// frozen while it runs: edits made mid-spawn were silently dropped, and Enter
+// twice would fire a second spawn.
+let spawning = false;
+function setModalBusy(busy) {
+  spawning = busy;
+  for (const el of $("#modal").querySelectorAll("input, select, textarea, button")) el.disabled = busy;
+  $("#modal").classList.toggle("busy", busy);
+}
+
+function closeModal() {
+  if (spawning) return;
+  backdrop.classList.add("hidden");
+}
+
+// Workspace values mirror the Go side: "" makes a fresh worktree, "@main" runs
+// in the repository itself, anything else is an existing worktree's slug.
+const WS_NEW = "", WS_MAIN = "@main";
+
+function addOption(sel, value, text) {
+  const opt = document.createElement("option");
+  opt.value = value; opt.textContent = text;
+  sel.appendChild(opt);
+  return opt;
+}
+
+// refreshWorkspaces rebuilds the picker for whatever repo is typed in, keeping
+// the current choice when it still exists.
+async function refreshWorkspaces() {
+  const sel = $("#m-workspace");
+  const prev = sel.value;
+  sel.innerHTML = "";
+  addOption(sel, WS_NEW, "New worktree — isolated copy on its own branch");
+  let list = [];
+  try { list = (await App?.Workspaces($("#m-repo").value.trim())) || []; } catch (_) {}
+  for (const w of list) {
+    const label = w.value === WS_MAIN
+      ? "Main working tree — run here, on the current branch"
+      : `Existing worktree — ${w.label}`;
+    addOption(sel, w.value, label + (w.inUse ? " (in use)" : "")).disabled = w.inUse;
+  }
+  sel.value = [...sel.options].some((o) => o.value === prev) ? prev : WS_NEW;
+  await syncWorkspace();
+}
+
+// syncWorkspace reflects the chosen workspace into the rest of the form: the
+// name field (an existing worktree's slug *is* its session name) and the list
+// of conversations recorded there.
+async function syncWorkspace() {
+  const ws = $("#m-workspace").value;
+  const note = $("#m-workspace-note");
+  const nameEl = $("#m-name");
+  if (ws === WS_MAIN) {
+    note.textContent = "The agent edits the repository directly. Nothing is isolated, and discarding never deletes anything.";
+  } else if (ws !== WS_NEW) {
+    note.textContent = "Reattaches to that worktree and its branch — nothing new is created.";
+  }
+  note.classList.toggle("hidden", ws === WS_NEW);
+  $("#m-name-label").textContent = ws === WS_NEW ? "Name / branch" : "Name";
+  if (ws !== WS_NEW && ws !== WS_MAIN) {
+    nameEl.value = ws;
+    nameEl.disabled = true;
+  } else {
+    if (nameEl.disabled) nameEl.value = "";
+    nameEl.disabled = false;
+  }
+  await refreshConversations();
+}
+
+// Conversations are keyed by working directory, so only an existing workspace
+// has any — a worktree that doesn't exist yet has no history to continue.
+async function refreshConversations() {
+  const sel = $("#m-convo");
+  sel.innerHTML = "";
+  addOption(sel, "", "New conversation");
+  let list = [];
+  try {
+    list = (await App?.Conversations($("#m-repo").value.trim(), $("#m-workspace").value)) || [];
+  } catch (_) {}
+  for (const c of list) addOption(sel, c.id, `${c.summary || c.id.slice(0, 8)} — ${timeAgo(c.updatedAt)}`);
+  sel.value = "";
+  $("#m-convo-row").classList.toggle("hidden", list.length === 0);
+}
+
+function timeAgo(iso) {
+  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (mins < 60) return `${mins}m ago`;
+  if (mins < 60 * 24) return `${Math.round(mins / 60)}h ago`;
+  return `${Math.round(mins / (60 * 24))}d ago`;
+}
 
 async function browseForRepo() {
   try {
     const p = await App.BrowseForRepo();
-    if (p) $("#m-repo").value = p;
+    if (p) { $("#m-repo").value = p; await refreshWorkspaces(); }
   } catch (e) {
     $("#modal-err").textContent = String(e);
   }
 }
 
 async function spawn() {
+  if (spawning) return;
   const repo = $("#m-repo").value.trim();
   if (!repo) { $("#modal-err").textContent = "repository path is required"; return; }
   const btn = $("#m-spawn");
-  btn.disabled = true; btn.textContent = "Spawning…";
+  setModalBusy(true);
+  btn.textContent = "Spawning…";
+  $("#modal-err").textContent = "";
   try {
     const dto = await App.SpawnSession(
-      repo, $("#m-prompt").value, $("#m-name").value.trim(), $("#m-agent").value, $("#m-mcp").checked
+      repo, $("#m-prompt").value, $("#m-name").value.trim(), $("#m-agent").value,
+      $("#m-workspace").value, $("#m-convo").value, $("#m-mcp").checked
     );
     closeModal();
     focusedId = dto.id;
@@ -541,7 +685,8 @@ async function spawn() {
   } catch (e) {
     $("#modal-err").textContent = String(e);
   } finally {
-    btn.disabled = false; btn.textContent = "Spawn";
+    setModalBusy(false);
+    btn.textContent = "Spawn";
   }
 }
 
@@ -601,6 +746,16 @@ document.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter" && ev.target.id !== "m-prompt") { ev.preventDefault(); spawn(); }
     return;
   }
+  // Terminal zoom works in both modes, so it comes before the attached
+  // short-circuit. stopPropagation keeps xterm from also seeing the chord.
+  if (ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+    const zoom = { "+": 1, "=": 1, "-": -1, "_": -1, "0": 0 }[ev.key];
+    if (zoom !== undefined) {
+      ev.preventDefault(); ev.stopPropagation();
+      setFontSize(zoom === 0 ? FONT_DEFAULT : termFontSize + zoom);
+      return;
+    }
+  }
   if (attached) {
     if (ev.ctrlKey && (ev.key === "q" || ev.key === "Q")) {
       ev.preventDefault(); ev.stopPropagation(); detach();
@@ -628,6 +783,8 @@ $("#new-btn").addEventListener("click", openModal);
 $("#m-cancel").addEventListener("click", closeModal);
 $("#m-spawn").addEventListener("click", spawn);
 $("#m-browse").addEventListener("click", browseForRepo);
+$("#m-workspace").addEventListener("change", syncWorkspace);
+$("#m-repo").addEventListener("change", refreshWorkspaces);
 $("#kill-btn").addEventListener("click", killFocused);
 $("#discard-btn").addEventListener("click", openDiscardModal);
 $("#d-cancel").addEventListener("click", closeDiscardModal);

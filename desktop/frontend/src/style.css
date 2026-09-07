@@ -67,6 +67,10 @@ button, .tab, input, select, textarea, #session-list, #focus-actions {
 .dot.awaiting-input { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
 .dot.complete, .dot.killed, .dot.failed { background: var(--muted); }
 .dot.interrupted { background: var(--red); }
+.session .tag {
+  font-size: 10px; padding: 0 4px; border-radius: 4px;
+  border: 1px solid var(--border); color: var(--yellow);
+}
 #sidebar-foot { padding: 8px; border-top: 1px solid var(--border); }
 
 button {
@@ -109,7 +113,18 @@ body.attached #main { box-shadow: inset 0 0 0 2px var(--green); }
 .view { flex: 1; min-height: 0; display: none; position: relative; }
 .view.active { display: block; }
 #term-host, #shell-host { position: absolute; inset: 0; padding: 6px; }
+/* The message is wrapped in one <span>: a flex container strips the
+   whitespace around inline children, which ate the spaces around "+ New". */
 .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); }
+
+/* xterm.css hard-codes overflow-y: scroll, so every pane showed a dead
+   scrollbar track even with nothing to scroll (agents run in the alt screen,
+   which has no scrollback at all). auto only draws one when it's usable. */
+.xterm .xterm-viewport { overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+.xterm .xterm-viewport::-webkit-scrollbar { width: 9px; }
+.xterm .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
+.xterm .xterm-viewport::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+.xterm .xterm-viewport::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 
 /* one wrapper per session terminal; only the focused one shows (focus mode) */
 .term-pane { position: absolute; inset: 0; padding: 6px; display: none; }
@@ -160,8 +175,12 @@ body.attached #main { box-shadow: inset 0 0 0 2px var(--green); }
   border-radius: 7px; padding: 7px 9px; font: 13px var(--mono);
 }
 .modal textarea { resize: vertical; font-family: var(--mono); }
+.modal input:disabled, .modal select:disabled, .modal textarea:disabled { opacity: 0.5; }
+.modal.busy { cursor: progress; }
+.modal.busy button { opacity: 0.5; cursor: progress; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 .modal-sub { margin: 0; font-size: 13px; color: var(--text); }
 .modal-note { margin: 0; font-size: 12px; color: var(--muted); }
+#d-worktree-opts { display: flex; flex-direction: column; gap: 12px; }
 #modal-err { color: var(--red); font-size: 12px; min-height: 14px; }
 .hidden { display: none !important; }

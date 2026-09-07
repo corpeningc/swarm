@@ -50,6 +50,10 @@ type Session struct {
 	AgentName string
 	Prompt    string
 	EnableMCP bool // spawn-time choice, persisted so resume matches it
+	// InPlace marks a session running in the repository's own working tree
+	// instead of a swarm-managed worktree. Persisted because discard must
+	// never destroy such a "worktree" — it is the user's repo.
+	InPlace bool
 	Status    Status
 	CreatedAt time.Time
 	UpdatedAt time.Time
