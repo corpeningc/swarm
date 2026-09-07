@@ -70,7 +70,8 @@ jobs:
         run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
 
       # Stamps the version into the binary's file properties and, on Windows,
-      # into the installer + Add/Remove Programs entry.
+      # into the installer + Add/Remove Programs entry. The -ldflags below
+      # stamp the same version into the app itself, for its update check.
       - name: Stamp version into wails.json
         run: |
           cd desktop
@@ -82,16 +83,16 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: |
           makensis -VERSION
-          cd desktop && wails build -platform windows/amd64 -nsis -trimpath -clean
+          cd desktop && wails build -platform windows/amd64 -nsis -trimpath -clean -ldflags "-X main.version=${{ steps.v.outputs.version }}"
           test -f build/bin/swarm-amd64-installer.exe
 
       - name: Build (macOS)
         if: matrix.os == 'macos-latest'
-        run: cd desktop && wails build -platform darwin/universal -trimpath -clean
+        run: cd desktop && wails build -platform darwin/universal -trimpath -clean -ldflags "-X main.version=${{ steps.v.outputs.version }}"
 
       - name: Build (Linux)
         if: matrix.os == 'ubuntu-latest'
-        run: cd desktop && wails build -platform linux/amd64 -tags webkit2_41 -trimpath -clean
+        run: cd desktop && wails build -platform linux/amd64 -tags webkit2_41 -trimpath -clean -ldflags "-X main.version=${{ steps.v.outputs.version }}"
 
       - name: Package
         id: pkg

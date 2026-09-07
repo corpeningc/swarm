@@ -23,11 +23,18 @@ import (
 	"github.com/corpeningc/swarm/internal/config"
 	"github.com/corpeningc/swarm/internal/core"
 	"github.com/corpeningc/swarm/internal/session"
+	"github.com/corpeningc/swarm/internal/update"
 	"github.com/corpeningc/swarm/internal/worktree"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
+
+// version is the release this binary was built from, stamped by CI with
+// `-ldflags "-X main.version=<tag>"`. A local build keeps update.DevVersion,
+// which suppresses the update banner — a dev build is usually ahead of the
+// last release, not behind it.
+var version = update.DevVersion
 
 func main() {
 	// Claude Code's hooks (wired by claudecode.writeClaudeHooks) invoke this

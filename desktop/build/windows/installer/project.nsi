@@ -77,6 +77,30 @@ ShowInstDetails show # This will always show the installation details.
 
 Function .onInit
    !insertmacro wails.checkArchitecture
+
+   # Reinstall over the previous install, wherever the user put it. NSIS's own
+   # InstallDirRegKey reads the 32-bit registry view, but wails.writeUninstaller
+   # runs under SetRegView 64 - so read it back the same way.
+   SetRegView 64
+   ReadRegStr $0 HKLM "${UNINST_KEY}" "InstallLocation"
+   ${If} $0 != ""
+      StrCpy $INSTDIR $0
+   ${EndIf}
+
+   # A running swarm.exe holds a lock on its own binary, which makes the copy
+   # below fail with a bare "can't write to file". Close it first, with a
+   # warning: agents running under it die with it. /S auto-answers IDOK.
+   nsExec::ExecToStack 'cmd /c tasklist /NH /FI "IMAGENAME eq ${PRODUCT_EXECUTABLE}" | find /I "${PRODUCT_EXECUTABLE}"'
+   Pop $0
+   Pop $1
+   ${If} $0 == 0
+      MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION /SD IDOK "${INFO_PRODUCTNAME} is running and must be closed to continue.$\n$\nAny agent sessions it is running will be terminated." IDOK closeRunning
+      Abort
+      closeRunning:
+      nsExec::Exec 'taskkill /F /IM "${PRODUCT_EXECUTABLE}" /T'
+      Pop $0
+      Sleep 1000
+   ${EndIf}
 FunctionEnd
 
 Section
@@ -95,6 +119,12 @@ Section
     !insertmacro wails.associateCustomProtocols
 
     !insertmacro wails.writeUninstaller
+
+    # wails.writeUninstaller doesn't record where it installed. Without this a
+    # reinstall forgets a custom directory and lands a second copy in the
+    # default one. Same registry view the macro used.
+    SetRegView 64
+    WriteRegStr HKLM "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
 SectionEnd
 
 Section "uninstall"

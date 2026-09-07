@@ -36,6 +36,10 @@ cmd/swarm ──▶  internal/core.Orchestrator  ◀── desktop (Wails)
   pipeline lifted out of the Bubbletea `Workspace`).
 - `desktop/app.go` — Wails bindings. Exported methods become JS promises; PTY
   output is streamed to the frontend as `pty:data` events.
+- `internal/update` — asks the GitHub Releases API for the latest tag and
+  compares it to the stamped version. Surfaced through `App.CheckUpdate` as the
+  banner above the tab bar; swarm has no auto-updater, so this is the only place
+  a running app can say a newer build exists.
 - `desktop/frontend/` — Vite + xterm.js. One persistent `Terminal` per session
   so output accumulates while hidden; focus mode shows one, grid mode tiles all.
 
@@ -50,6 +54,11 @@ cd desktop
 wails dev      # hot-reload dev mode
 wails build    # produces build/bin/swarm-desktop.exe
 ```
+
+The release version is stamped in with `-ldflags "-X main.version=<tag>"` (see
+`.github/workflows/release.yml`). A build without it reports `dev`, which
+suppresses the update banner — a local build is normally ahead of the last
+release, not behind it.
 
 > `wails build` compiles the frontend (`npm install && npm run build`) before
 > the Go binary, so `frontend/dist/` — required by the `//go:embed` in

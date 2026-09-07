@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/corpeningc/swarm/internal/agent/claudecode"
 	"github.com/corpeningc/swarm/internal/core"
 	"github.com/corpeningc/swarm/internal/session"
+	"github.com/corpeningc/swarm/internal/update"
 	"github.com/corpeningc/swarm/internal/worktree"
 )
 
@@ -127,6 +129,48 @@ func (a *App) ListSessions() []SessionDTO {
 		out = append(out, toDTO(h))
 	}
 	return out
+}
+
+// Version returns the release this build came from ("dev" locally).
+func (a *App) Version() string { return version }
+
+// UpdateDTO is the result of an update check. Available is the only field the
+// banner needs; the rest is what it shows and where it points.
+type UpdateDTO struct {
+	Available bool   `json:"available"`
+	Current   string `json:"current"`
+	Latest    string `json:"latest"`
+	URL       string `json:"url"`
+}
+
+// CheckUpdate asks GitHub whether a newer swarm has been released. Swarm has
+// no auto-updater, so this is how a running app finds out. Errors (offline,
+// rate-limited) are returned for the caller to swallow — a failed check must
+// never be visible.
+func (a *App) CheckUpdate() (*UpdateDTO, error) {
+	ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
+	defer cancel()
+	rel, err := update.Latest(ctx, update.DefaultRepo)
+	if err != nil {
+		return nil, err
+	}
+	return &UpdateDTO{
+		Available: update.Newer(version, rel.Version),
+		Current:   version,
+		Latest:    rel.Version,
+		URL:       rel.URL,
+	}, nil
+}
+
+// OpenReleasePage opens a swarm release page in the system browser. Limited to
+// this project's own URLs: the frontend is trusted, but a bound method that
+// opens anything is a needlessly sharp edge.
+func (a *App) OpenReleasePage(url string) error {
+	if !strings.HasPrefix(url, "https://github.com/"+update.DefaultRepo+"/") {
+		return fmt.Errorf("refusing to open %q: not a swarm release page", url)
+	}
+	wruntime.BrowserOpenURL(a.ctx, url)
+	return nil
 }
 
 // AgentNames returns the selectable agents, default first.

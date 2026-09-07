@@ -76,6 +76,19 @@ macOS. Pin a version with `-Version 0.1.0` / `SWARM_VERSION=0.1.0`.
 > right-click → **Open**, or run `xattr -dr com.apple.quarantine
 > /Applications/swarm.app` (the install script does this for you).
 
+### Updating
+
+The desktop app checks GitHub for a newer release on launch and shows a banner
+when one exists; **Download** opens the release page, **Dismiss** hides it until
+the next version. There is no auto-updater - installing an update is the same
+step as installing it the first time:
+
+- **Windows** - run the new `-setup.exe`. It upgrades in place, reusing the
+  directory you originally chose, and closes a running swarm first (agent
+  sessions it is running are terminated, so quit cleanly if you can).
+- **macOS / Linux** - re-run the one-line install command above, or replace the
+  app/binary by hand.
+
 ### Terminal UI
 
 Requires Go 1.25+.

@@ -800,8 +800,43 @@ discardBackdrop.addEventListener("mousedown", (e) => { if (e.target === discardB
 window.addEventListener("resize", fitVisible);
 new ResizeObserver(fitVisible).observe(termHost);
 
+// ---- update check ----
+// Swarm ships unsigned with no auto-updater, so the app asks GitHub once at
+// startup whether a newer release exists. A failed check (offline, rate
+// limited) stays silent — it is never worth a visible error.
+const SKIP_UPDATE_KEY = "swarm.skipUpdate";
+let pendingUpdate = null;
+
+async function checkForUpdate() {
+  let info;
+  try {
+    info = await App?.CheckUpdate();
+  } catch (_) {
+    return;
+  }
+  if (!info?.available) return;
+  let skipped = null;
+  try { skipped = localStorage.getItem(SKIP_UPDATE_KEY); } catch (_) {}
+  if (skipped === info.latest) return;
+  pendingUpdate = info;
+  $("#update-text").innerHTML =
+    `swarm <b>v${escapeHtml(info.latest)}</b> is available — you're on v${escapeHtml(info.current)}.`;
+  $("#update-banner").classList.remove("hidden");
+  fitVisible(); // the banner steals height from the terminal
+}
+
+$("#update-get").addEventListener("click", () => {
+  if (pendingUpdate) App?.OpenReleasePage(pendingUpdate.url).catch(() => {});
+});
+$("#update-dismiss").addEventListener("click", () => {
+  try { localStorage.setItem(SKIP_UPDATE_KEY, pendingUpdate?.latest || ""); } catch (_) {}
+  $("#update-banner").classList.add("hidden");
+  fitVisible();
+});
+
 // ---- boot ----
 refreshSessions().then(() => { fitVisible(); updateModeHint(); });
+checkForUpdate();
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
