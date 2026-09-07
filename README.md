@@ -52,7 +52,7 @@ required: grab it from the [latest release](https://github.com/corpeningc/swarm/
 | Platform | Get it |
 |---|---|
 | **Windows** | Download `swarm-desktop-<version>-windows-amd64-setup.exe` and run it. Installs WebView2 if missing, adds Start Menu + Desktop shortcuts, and registers an uninstaller. |
-| **macOS** | Download `swarm-desktop-<version>-macos-universal.zip`, unzip, drag `swarm-desktop.app` to Applications. |
+| **macOS** | Download `swarm-desktop-<version>-macos-universal.zip`, unzip, drag `swarm.app` to Applications. |
 | **Linux** | Download `swarm-desktop-<version>-linux-amd64.tar.gz` and extract. Needs `libwebkit2gtk-4.1` and `libgtk-3`. |
 
 Or one line:
@@ -74,7 +74,7 @@ macOS. Pin a version with `-Version 0.1.0` / `SWARM_VERSION=0.1.0`.
 > **The builds are unsigned.** Windows SmartScreen shows "Windows protected your
 > PC" — click **More info → Run anyway**. macOS says the app "cannot be opened":
 > right-click → **Open**, or run `xattr -dr com.apple.quarantine
-> /Applications/swarm-desktop.app` (the install script does this for you).
+> /Applications/swarm.app` (the install script does this for you).
 
 ### Terminal UI
 
