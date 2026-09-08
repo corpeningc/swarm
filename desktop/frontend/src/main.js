@@ -157,9 +157,47 @@ function labelFor(id) {
   return s ? s.label : id;
 }
 
+// ---- repo grouping ----
+// Sessions are held grouped by repo (repos in order of first appearance) so
+// the sidebar can head each run with a single separator. Normalising the order
+// here rather than only at render time means a drag that drops a row among
+// another repo's sessions settles back into its own group, instead of
+// splitting that repo across two separators.
+function groupByRepo(list) {
+  const groups = new Map();
+  for (const s of list) {
+    const key = s.repo || "";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
+  }
+  return [...groups.values()].flat();
+}
+
+// repoName is the trailing path segment — the sidebar is too narrow for more.
+function repoName(repo) {
+  if (!repo) return "(no repo)";
+  const parts = repo.replace(/[\\/]+$/, "").split(/[\\/]/);
+  return parts[parts.length - 1] || repo;
+}
+
 function renderSidebar() {
   listEl.innerHTML = "";
+  // With every session in one repo the header is just noise — the window is
+  // already that repo. Separators only earn their space once repos mix.
+  const repos = [...new Set(sessions.map((s) => s.repo || ""))];
+  let lastRepo = null;
   for (const s of sessions) {
+    const repo = s.repo || "";
+    if (repos.length > 1 && repo !== lastRepo) {
+      lastRepo = repo;
+      const sep = document.createElement("li");
+      sep.className = "repo-sep";
+      sep.title = repo || "no repository";
+      const count = sessions.filter((x) => (x.repo || "") === repo).length;
+      sep.innerHTML = `<span class="repo-name">${escapeHtml(repoName(repo))}</span>` +
+        `<span class="repo-count">${count}</span>`;
+      listEl.appendChild(sep);
+    }
     const li = document.createElement("li");
     li.className = "session" + (s.id === focusedId ? " focused" : "");
     li.dataset.id = s.id;
@@ -233,9 +271,10 @@ function wireRowDrag(li, id) {
 // persists it. The backend emits sessions:change, which re-syncs everything.
 async function commitOrder(order) {
   sessions.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+  sessions = groupByRepo(sessions);
   renderSidebar();
   orderPanes();
-  await App?.ReorderSessions(order);
+  await App?.ReorderSessions(sessions.map((s) => s.id));
 }
 
 // wirePaneDrag makes a grid tile draggable by its title bar. Tiles shift live
@@ -467,7 +506,7 @@ function openShell(id) {
 // ---- actions ----
 async function refreshSessions() {
   if (!App) return;
-  sessions = (await App.ListSessions()) || [];
+  sessions = groupByRepo((await App.ListSessions()) || []);
   if (!focusedId && sessions.length) focusedId = sessions[0].id;
   // Pre-create terminals for live sessions so grid mode shows them and no
   // early output is lost.

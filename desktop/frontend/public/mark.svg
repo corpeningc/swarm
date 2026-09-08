@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs><polygon id="c" points="6.393,0.000 3.196,5.536 -3.196,5.536 -6.393,0.000 -3.196,-5.536 3.196,-5.536"/></defs>
+  <g transform="translate(-26.588 -20.729) scale(1.8309)">
+    <use href="#c" x="32.000" y="32.000" fill="#8dbbff"/>
+    <use href="#c" x="32.000" y="19.200" fill="#5ad48a"/>
+    <use href="#c" x="43.085" y="38.400" fill="#4e6ca0"/>
+    <use href="#c" x="20.915" y="38.400" fill="#6aa3ff"/>
+  </g>
+</svg>

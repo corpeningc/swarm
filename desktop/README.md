@@ -67,6 +67,21 @@ release, not behind it.
 > `main.go` — is generated as part of the build. A bare `go build ./desktop`
 > only works after `frontend/dist/` exists.
 
+### Icon
+
+The app icon is generated, not hand-drawn — a honeycomb of agent cells in the
+frontend palette:
+
+```sh
+python build/gen-appicon.py   # needs pillow
+```
+
+It writes `build/appicon.png` (macOS/Linux), `build/windows/icon.ico` (the
+Windows window and taskbar icon, with a simplified 3-cell comb at 32px and
+below) and `frontend/public/{favicon,mark}.svg` (webview favicon and sidebar
+brand mark). Edit the palette or layout constants at the top of the script and
+re-run it; `wails build` picks the results up.
+
 The app launches in the directory you run it from; that git repo becomes the
 default for new sessions. The New-session modal offers a type-ahead repo
 dropdown (launch repo + repos of existing sessions + sibling repos) and a
