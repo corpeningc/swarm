@@ -17,8 +17,10 @@ Things a terminal can't give you that this unlocks:
   scrolling and +/- coloring instead of a cramped pane.
 - **Discoverability.** Buttons and a modal instead of memorized keybindings.
 
-The terminal UI (`cmd/swarm`) remains the primary, SSH-friendly frontend. This
-is a second frontend over the same engine, not a replacement.
+This is the default way to run swarm. The terminal UI (`cmd/swarm`) covers what
+a desktop app structurally can't: a remote dev box, a container, anything you
+reach over SSH. Two frontends over one engine — pick the one that fits where
+your code lives.
 
 ## Architecture
 

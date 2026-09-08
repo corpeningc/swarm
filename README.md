@@ -80,18 +80,19 @@ macOS. Pin a version with `-Version 0.1.0` / `SWARM_VERSION=0.1.0`.
 
 The desktop app checks GitHub for a newer release on launch and shows a banner
 when one exists; **Download** opens the release page, **Dismiss** hides it until
-the next version. There is no auto-updater - installing an update is the same
+the next version. There is no auto-updater — installing an update is the same
 step as installing it the first time:
 
-- **Windows** - run the new `-setup.exe`. It upgrades in place, reusing the
+- **Windows** — run the new `-setup.exe`. It upgrades in place, reusing the
   directory you originally chose, and closes a running swarm first (agent
   sessions it is running are terminated, so quit cleanly if you can).
-- **macOS / Linux** - re-run the one-line install command above, or replace the
+- **macOS / Linux** — re-run the one-line install command above, or replace the
   app/binary by hand.
 
 ### Terminal UI
 
-Requires Go 1.25+.
+The same engine without the window — for a remote dev box, a container, or
+anything else you reach over SSH. Requires Go 1.25+.
 
 ```sh
 go install github.com/corpeningc/swarm/cmd/swarm@latest
