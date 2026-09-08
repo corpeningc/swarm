@@ -191,16 +191,19 @@ function repoName(repo) {
 }
 
 // renderFocusTitle writes the tab-bar caption for the focused session:
-// "<repo> / <name>", plus a tagged branch chip. A session's branch is taken
-// verbatim from its name, so the two are usually the same string and printing
-// both just stutters — the chip appears only once they actually differ (a
-// nickname, a sanitized name, or an in-place session on the repo's own branch).
+// "<repo> / <name>", plus a tagged branch chip. Both prefixes are conditional,
+// because the tab bar is the narrowest strip in the window: the repo appears
+// only while sessions span more than one (as the sidebar separators do), and
+// the branch — taken verbatim from the session name, so usually the very same
+// string — only once it actually differs (a nickname, a sanitized name, or an
+// in-place session sitting on the repo's own branch).
 function renderFocusTitle() {
   const s = sessions.find((x) => x.id === focusedId);
   if (!s) { focusTitle.innerHTML = ""; return; }
   const sameName = !!s.branch && s.branch === s.label;
+  const multiRepo = new Set(sessions.map((x) => x.repo || "")).size > 1;
   let html = "";
-  if (s.repo) {
+  if (s.repo && multiRepo) {
     html += `<span class="ft-repo" title="${escapeHtml(s.repo)}">${escapeHtml(repoName(s.repo))}</span>`;
     html += `<span class="ft-slash">/</span>`;
   }

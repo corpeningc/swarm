@@ -124,9 +124,11 @@ button.danger:hover { border-color: var(--red); color: var(--red); }
 }
 #focus-title .ft-name { color: var(--text); }
 #focus-title .ft-repo, #focus-title .ft-slash { color: var(--muted); }
-/* A long name or repo ellipsizes instead of shoving the action buttons off. */
+/* A long name or repo ellipsizes instead of shoving the mode hint and the
+   action buttons off the end of the bar. min-width:0 is what lets these flex
+   items actually shrink past their text. */
 #focus-title .ft-name, #focus-title .ft-repo {
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 #focus-title .ft-slash, #focus-title .ft-branch { flex: 0 0 auto; }
 #focus-title .ft-slash { opacity: 0.5; }
