@@ -118,7 +118,25 @@ button.danger:hover { border-color: var(--red); color: var(--red); }
 }
 .tab { background: transparent; border: none; padding: 6px 12px; border-radius: 7px; color: var(--muted); }
 .tab.active { background: var(--bg-elev2); color: var(--text); }
-#focus-title { color: var(--muted); margin-left: 10px; font-family: var(--mono); font-size: 12px; }
+#focus-title {
+  color: var(--muted); margin-left: 10px; font-family: var(--mono); font-size: 12px;
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+}
+#focus-title .ft-name { color: var(--text); }
+#focus-title .ft-repo, #focus-title .ft-slash { color: var(--muted); }
+/* A long name or repo ellipsizes instead of shoving the action buttons off. */
+#focus-title .ft-name, #focus-title .ft-repo {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#focus-title .ft-slash, #focus-title .ft-branch { flex: 0 0 auto; }
+#focus-title .ft-slash { opacity: 0.5; }
+/* Only shown when the branch differs from the session name, so it always
+   carries its own key rather than sitting there as a bare second name. */
+#focus-title .ft-branch {
+  font-size: 11px; padding: 1px 7px; border-radius: 10px;
+  border: 1px solid var(--border); color: var(--text);
+}
+#focus-title .ft-key { color: var(--muted); margin-right: 5px; }
 #mode-hint { margin-left: 10px; font-size: 11px; padding: 2px 8px; border-radius: 10px; color: var(--muted); border: 1px solid var(--border); }
 #mode-hint.attached { color: #0c1320; background: var(--green); border-color: var(--green); font-weight: 600; }
 #focus-actions { margin-left: auto; display: flex; gap: 6px; }

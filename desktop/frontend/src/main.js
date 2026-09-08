@@ -98,7 +98,7 @@ function ensureTerm(id) {
 
   const title = document.createElement("div");
   title.className = "pane-title";
-  title.textContent = labelFor(id);
+  title.textContent = paneTitleFor(id);
   pane.appendChild(title);
   wirePaneDrag(pane, title, id); // grid tiles reorder by dragging the title bar
 
@@ -157,6 +157,16 @@ function labelFor(id) {
   return s ? s.label : id;
 }
 
+// Grid tiles from different repos can carry the same session name, so a tile's
+// title names its repo too — but only while repos actually mix, matching the
+// sidebar's separators.
+function paneTitleFor(id) {
+  const s = sessions.find((x) => x.id === id);
+  if (!s) return id;
+  const multiRepo = new Set(sessions.map((x) => x.repo || "")).size > 1;
+  return multiRepo && s.repo ? `${repoName(s.repo)} / ${s.label}` : s.label;
+}
+
 // ---- repo grouping ----
 // Sessions are held grouped by repo (repos in order of first appearance) so
 // the sidebar can head each run with a single separator. Normalising the order
@@ -180,6 +190,28 @@ function repoName(repo) {
   return parts[parts.length - 1] || repo;
 }
 
+// renderFocusTitle writes the tab-bar caption for the focused session:
+// "<repo> / <name>", plus a tagged branch chip. A session's branch is taken
+// verbatim from its name, so the two are usually the same string and printing
+// both just stutters — the chip appears only once they actually differ (a
+// nickname, a sanitized name, or an in-place session on the repo's own branch).
+function renderFocusTitle() {
+  const s = sessions.find((x) => x.id === focusedId);
+  if (!s) { focusTitle.innerHTML = ""; return; }
+  const sameName = !!s.branch && s.branch === s.label;
+  let html = "";
+  if (s.repo) {
+    html += `<span class="ft-repo" title="${escapeHtml(s.repo)}">${escapeHtml(repoName(s.repo))}</span>`;
+    html += `<span class="ft-slash">/</span>`;
+  }
+  html += `<span class="ft-name" title="${sameName ? "worktree and branch" : "session"}">${escapeHtml(s.label)}</span>`;
+  if (s.branch && !sameName) {
+    html += `<span class="ft-branch"><span class="ft-key">branch</span>${escapeHtml(s.branch)}</span>`;
+  }
+  if (s.inPlace) html += `<span class="ft-branch">in-place</span>`;
+  focusTitle.innerHTML = html;
+}
+
 function renderSidebar() {
   listEl.innerHTML = "";
   // With every session in one repo the header is just noise — the window is
@@ -198,6 +230,14 @@ function renderSidebar() {
         `<span class="repo-count">${count}</span>`;
       listEl.appendChild(sep);
     }
+    // The branch matches the label directly above it in every case but a
+    // rename or a sanitized name, so it earns a slot in the one-line meta only
+    // when it differs — which leaves room for the repo once repos mix.
+    const meta = [
+      repos.length > 1 ? escapeHtml(repoName(repo)) : "",
+      escapeHtml(s.agentName || "claude"),
+      s.branch && s.branch !== s.label ? escapeHtml(s.branch) : "",
+    ].filter(Boolean).join(" · ");
     const li = document.createElement("li");
     li.className = "session" + (s.id === focusedId ? " focused" : "");
     li.dataset.id = s.id;
@@ -206,7 +246,7 @@ function renderSidebar() {
         <span class="dot ${s.status}"></span>
         <span class="label">${escapeHtml(s.label)}</span>
       </div>
-      <div class="meta">${escapeHtml(s.agentName || "claude")} · ${escapeHtml(s.branch || "")}${s.inPlace ? ' <span class="tag">in-place</span>' : ""} ${s.live ? "" : "· (stopped)"}</div>`;
+      <div class="meta">${meta}${s.inPlace ? ' <span class="tag">in-place</span>' : ""} ${s.live ? "" : "· (stopped)"}</div>`;
     if (s.id === renamingId) {
       const input = document.createElement("input");
       input.className = "rename-input";
@@ -232,7 +272,7 @@ function renderSidebar() {
   // Reflect live set into grid panes: focus ring + label (nicknames change).
   for (const [id, entry] of terms) {
     entry.pane.classList.toggle("focused", id === focusedId);
-    entry.pane.querySelector(".pane-title").textContent = labelFor(id);
+    entry.pane.querySelector(".pane-title").textContent = paneTitleFor(id);
   }
 }
 
@@ -360,8 +400,7 @@ function cancelRename() {
 function focusSession(id) {
   if (attached && id !== focusedId) detach(); // switching focus drops the old attachment
   focusedId = id;
-  const s = sessions.find((x) => x.id === id);
-  focusTitle.textContent = s ? `${s.label} — ${s.branch || ""}` : "";
+  renderFocusTitle();
   termEmpty.classList.toggle("hidden", !!id);
   applyPaneVisibility();
   if (view === "diff") loadDiff(id);
@@ -513,10 +552,7 @@ async function refreshSessions() {
   for (const s of sessions) if (s.live) ensureTerm(s.id);
   renderSidebar();
   orderPanes();
-  if (focusedId) {
-    const s = sessions.find((x) => x.id === focusedId);
-    focusTitle.textContent = s ? `${s.label} — ${s.branch || ""}` : "";
-  }
+  renderFocusTitle();
   termEmpty.classList.toggle("hidden", sessions.length > 0);
   applyPaneVisibility();
 }
