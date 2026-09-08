@@ -45,8 +45,24 @@ button, .tab, input, select, textarea, #session-list, #focus-actions {
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 14px; border-bottom: 1px solid var(--border);
 }
-.brand { font-weight: 700; letter-spacing: 0.5px; }
+.brand { font-weight: 700; letter-spacing: 0.5px; display: flex; align-items: center; gap: 7px; }
+.brand-mark { width: 18px; height: 18px; }
 #session-list { list-style: none; margin: 0; padding: 6px; flex: 1; overflow-y: auto; }
+
+/* One header per repo run in the session list; rendered only once sessions
+   span more than one repo. The rule is an ::after so it fills whatever space
+   the repo name leaves, with the session count pinned past it. */
+.repo-sep {
+  display: flex; align-items: center; gap: 8px; cursor: default;
+  margin: 13px 2px 5px; padding: 0 8px;
+  font: 600 10px var(--mono); letter-spacing: 0.7px; text-transform: uppercase;
+  color: var(--muted);
+}
+.repo-sep:first-child { margin-top: 3px; }
+/* a touch lighter than --border; a 1px rule in --border is invisible here */
+.repo-sep::after { content: ""; order: 1; flex: 1; height: 1px; background: #373e4b; }
+.repo-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.repo-count { order: 2; }
 .session {
   padding: 8px 10px; border-radius: 8px; cursor: pointer;
   display: flex; flex-direction: column; gap: 2px; margin-bottom: 4px;

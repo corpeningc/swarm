@@ -26,3 +26,6 @@ spike/**/spike-*
 
 # Wails npm-install cache marker
 desktop/frontend/package.json.md5
+
+# Icon generator bytecode
+__pycache__/
