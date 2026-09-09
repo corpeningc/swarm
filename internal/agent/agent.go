@@ -91,7 +91,12 @@ const (
 )
 
 type Event struct {
-	Kind   EventKind
+	Kind EventKind
+	// Text is raw PTY output for EventOutput. Adapters never end it in the
+	// middle of a multi-byte character — a glyph a PTY read tore in two is
+	// re-joined before it's emitted — so consumers that re-encode chunks
+	// (the desktop app JSON-encodes each one for the webview) see whole
+	// characters, never U+FFFD substitutes.
 	Text   string
 	Tokens *TokenUsage
 	// Err is non-nil for EventError. ExitCode is set on EventDone (-1 if
