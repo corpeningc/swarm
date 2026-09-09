@@ -155,14 +155,22 @@ func (a *Adapter) readLoop(cmd *pty.Cmd, pt pty.Pty) {
 	defer close(a.done)
 	defer close(a.events)
 	buf := make([]byte, readChunkSize)
+	// Each event carries whole characters only; a glyph a read tore in two
+	// is completed by the next read (see ptyutil.RuneJoiner).
+	var join ptyutil.RuneJoiner
 	for {
 		n, err := pt.Read(buf)
 		if n > 0 {
-			a.events <- agent.Event{Kind: agent.EventOutput, Text: string(buf[:n])}
+			if out := join.Feed(buf[:n]); len(out) > 0 {
+				a.events <- agent.Event{Kind: agent.EventOutput, Text: string(out)}
+			}
 		}
 		if err != nil {
 			break
 		}
+	}
+	if rest := join.Flush(); len(rest) > 0 {
+		a.events <- agent.Event{Kind: agent.EventOutput, Text: string(rest)}
 	}
 	exitCode := -1
 	if waitErr := cmd.Wait(); waitErr == nil {
