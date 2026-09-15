@@ -78,6 +78,7 @@ button, .tab, input, select, textarea, #session-list, #focus-actions {
 .session .row1 { display: flex; align-items: center; gap: 7px; }
 .session .label { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session .meta { color: var(--muted); font-size: 11px; padding-left: 15px; }
+.session .row-kb { flex: 0 0 auto; }
 .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; background: var(--muted); }
 .dot.running { background: var(--green); }
 .dot.awaiting-input { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
@@ -146,11 +147,27 @@ button.danger:hover { border-color: var(--red); color: var(--red); }
 /* whole-window ring while attached, so it's obvious keystrokes go to the agent */
 body.attached #main { box-shadow: inset 0 0 0 2px var(--green); }
 
-#keyhints { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 10px; font-size: 10px; color: var(--muted); }
-#keyhints kbd {
-  font: 10px var(--mono); background: var(--bg); border: 1px solid var(--border);
-  border-radius: 4px; padding: 0 4px; color: var(--text);
+/* ---- keybind glyphs ----
+   A key annotating a control renders bare: a bordered chip inside a bordered
+   button is a box in a box, and there are seven such controls. Chips (kbd) are
+   reserved for the ? sheet, where the key itself is the subject. Glyphs stay
+   visible while attached, like the hints they replace — the green ring and the
+   "● attached" pill are what say whether navigation keys are live. */
+.kb { font: 11px var(--mono); color: var(--muted); pointer-events: none; }
+#new-btn, #grid-toggle, #kill-btn, #discard-btn, .tab, .modal-actions button {
+  display: inline-flex; align-items: center; gap: 7px;
 }
+#grid-toggle { justify-content: center; }
+/* On a filled button the muted grey would sink into the accent. */
+#grid-toggle.on .kb, button.primary .kb { color: inherit; opacity: 0.55; }
+
+/* The sheet is the only home left for keys with no control to sit on. */
+#shortcuts-btn {
+  width: 100%; margin-top: 6px; justify-content: center; gap: 7px;
+  display: inline-flex; align-items: center;
+  background: transparent; border-color: transparent; color: var(--muted); font-size: 11px;
+}
+#shortcuts-btn:hover { border-color: var(--border); color: var(--text); }
 
 .repo-row { display: flex; gap: 6px; }
 .repo-row input { flex: 1; }
@@ -189,8 +206,12 @@ body.attached #main { box-shadow: inset 0 0 0 2px var(--green); }
   padding: 3px 8px; background: var(--bg-elev); border-bottom: 1px solid var(--border);
   cursor: grab;
 }
+#term-host.grid .term-pane .pane-title { align-items: center; gap: 8px; }
+.pane-title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-kb { display: none; margin-left: auto; }
+#term-host.grid .term-pane.focused .pane-kb { display: inline; }
 .term-pane.dragging { opacity: 0.45; outline: 1px dashed var(--accent); }
-#term-host.grid .term-pane .pane-title { display: block; }
+#term-host.grid .term-pane .pane-title { display: flex; }
 .term-pane .pane-term { position: absolute; inset: 0; }
 #term-host.grid .term-pane .pane-term { position: absolute; top: 22px; inset-inline: 0; bottom: 0; }
 
@@ -229,4 +250,23 @@ body.attached #main { box-shadow: inset 0 0 0 2px var(--green); }
 .modal-note { margin: 0; font-size: 12px; color: var(--muted); }
 #d-worktree-opts { display: flex; flex-direction: column; gap: 12px; }
 #modal-err { color: var(--red); font-size: 12px; min-height: 14px; }
+
+/* ---- shortcuts sheet ---- */
+#keys-modal { width: 520px; }
+/* One grid for the whole sheet, not one per group: a grid per <dl> sizes its
+   max-content column independently, which lands the three groups' descriptions
+   on three different left edges. display:contents folds the lists into it. */
+.sheet { display: grid; grid-template-columns: max-content 1fr; gap: 5px 14px; align-items: baseline; }
+.sheet dl { display: contents; }
+.sheet h3 {
+  grid-column: 1 / -1; margin: 12px 0 0; font: 600 10px var(--mono);
+  letter-spacing: 0.7px; text-transform: uppercase; color: var(--muted);
+}
+.sheet h3:first-child { margin-top: 0; }
+.sheet dt { display: flex; gap: 3px; }
+.sheet dd { margin: 0; font-size: 12px; color: var(--text); }
+.sheet kbd {
+  font: 10px var(--mono); background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 5px; color: var(--text);
+}
 .hidden { display: none !important; }

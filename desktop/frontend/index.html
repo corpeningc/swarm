@@ -11,24 +11,12 @@
       <aside id="sidebar">
         <header id="sidebar-head">
           <span class="brand"><img class="brand-mark" src="./mark.svg" alt="" />swarm</span>
-          <button id="new-btn" title="New session">+ New</button>
+          <button id="new-btn" title="New session (n)">+ New<span class="kb">n</span></button>
         </header>
         <ul id="session-list"></ul>
         <footer id="sidebar-foot">
-          <button id="grid-toggle" title="Toggle grid of all live agents (g)">▦ Grid</button>
-          <div id="keyhints">
-            <span><kbd>j</kbd>/<kbd>k</kbd> nav</span>
-            <span><kbd>n</kbd> new</span>
-            <span><kbd>↵</kbd> attach</span>
-            <span><kbd>^Q</kbd> detach</span>
-            <span><kbd>x</kbd> kill</span>
-            <span><kbd>d</kbd> discard</span>
-            <span><kbd>r</kbd> rename</span>
-            <span><kbd>g</kbd> grid</span>
-            <span>drag to reorder</span>
-            <span><kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> tabs</span>
-            <span><kbd>^+</kbd>/<kbd>^-</kbd> text size</span>
-          </div>
+          <button id="grid-toggle" title="Toggle grid of all live agents (g)">▦ Grid<span class="kb">g</span></button>
+          <button id="shortcuts-btn" title="Keyboard shortcuts (?)"><span class="kb">?</span>shortcuts</button>
         </footer>
       </aside>
 
@@ -39,14 +27,14 @@
           <button id="update-dismiss" title="Hide until the next release">Dismiss</button>
         </div>
         <div id="tabbar">
-          <button class="tab active" data-view="terminal">Agent</button>
-          <button class="tab" data-view="diff">Diff</button>
-          <button class="tab" data-view="shell">Shell</button>
+          <button class="tab active" data-view="terminal"><span class="kb">1</span>Agent</button>
+          <button class="tab" data-view="diff"><span class="kb">2</span>Diff</button>
+          <button class="tab" data-view="shell"><span class="kb">3</span>Shell</button>
           <span id="focus-title"></span>
           <span id="mode-hint"></span>
           <span id="focus-actions">
-            <button id="kill-btn" title="Kill agent (keep worktree)">Kill</button>
-            <button id="discard-btn" class="danger" title="Remove session from panel…">Discard</button>
+            <button id="kill-btn" title="Kill agent, keep worktree (x)">Kill<span class="kb">x</span></button>
+            <button id="discard-btn" class="danger" title="Remove session from panel… (d)">Discard<span class="kb">d</span></button>
           </span>
         </div>
         <div id="view-terminal" class="view active">
@@ -77,8 +65,8 @@
         <label class="check"><input id="m-mcp" type="checkbox" /> Enable global MCP servers (slower startup)</label>
         <label>Prompt<textarea id="m-prompt" rows="5" placeholder="First message to the agent (optional)"></textarea></label>
         <div class="modal-actions">
-          <button id="m-cancel">Cancel</button>
-          <button id="m-spawn" class="primary">Spawn</button>
+          <button id="m-cancel">Cancel<span class="kb">esc</span></button>
+          <button id="m-spawn" class="primary">Spawn<span class="kb">↵</span></button>
         </div>
         <div id="modal-err"></div>
       </div>
@@ -96,8 +84,45 @@
         </div>
         <p id="d-inplace-note" class="modal-note hidden">This session runs in the repository's own working tree, so discarding only removes it from the panel. Your files and branch are untouched.</p>
         <div class="modal-actions">
-          <button id="d-cancel">Cancel</button>
-          <button id="d-confirm" class="danger">Discard</button>
+          <button id="d-cancel">Cancel<span class="kb">esc</span></button>
+          <button id="d-confirm" class="danger">Discard<span class="kb">↵</span></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Shortcuts sheet. Grouped by mode: these keys are modal, and a flat
+         list would sit ^Q (attached only) next to x (navigation only) with
+         nothing saying which one is live when. -->
+    <div id="keys-backdrop" class="modal-backdrop hidden">
+      <div class="modal" id="keys-modal">
+        <h2>Keyboard shortcuts</h2>
+        <div class="sheet">
+          <h3>Navigation</h3>
+          <dl>
+            <dt><kbd>j</kbd><kbd>k</kbd><kbd>↑</kbd><kbd>↓</kbd></dt><dd>Move focus</dd>
+            <dt><kbd>↵</kbd></dt><dd>Attach to the focused session (resumes it if stopped)</dd>
+            <dt><kbd>n</kbd></dt><dd>New session</dd>
+            <dt><kbd>x</kbd></dt><dd>Kill agent, keep the worktree</dd>
+            <dt><kbd>d</kbd></dt><dd>Discard session</dd>
+            <dt><kbd>r</kbd></dt><dd>Rename — or double-click the row</dd>
+            <dt><kbd>g</kbd></dt><dd>Toggle the grid of all live agents</dd>
+            <dt><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd></dt><dd>Agent / Diff / Shell tab</dd>
+            <dt><kbd>Tab</kbd></dt><dd>Cycle tabs</dd>
+            <dt><kbd>?</kbd></dt><dd>This sheet</dd>
+          </dl>
+          <h3>While attached</h3>
+          <dl>
+            <dt><kbd>Ctrl</kbd><kbd>Q</kbd></dt><dd>Detach — every other key goes to the agent</dd>
+          </dl>
+          <h3>Anywhere</h3>
+          <dl>
+            <dt><kbd>Ctrl</kbd><kbd>+</kbd><kbd>-</kbd><kbd>0</kbd></dt><dd>Terminal text size</dd>
+            <dt><kbd>F11</kbd></dt><dd>Fullscreen</dd>
+          </dl>
+        </div>
+        <p class="modal-note">Drag a session row — or a grid tile’s title bar — to reorder.</p>
+        <div class="modal-actions">
+          <button id="k-close">Close<span class="kb">esc</span></button>
         </div>
       </div>
     </div>

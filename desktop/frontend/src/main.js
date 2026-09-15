@@ -98,7 +98,16 @@ function ensureTerm(id) {
 
   const title = document.createElement("div");
   title.className = "pane-title";
-  title.textContent = paneTitleFor(id);
+  const titleText = document.createElement("span");
+  titleText.className = "pane-title-text";
+  titleText.textContent = paneTitleFor(id);
+  // Shown on the focused tile only. Grid is where attaching is least obvious:
+  // a click here selects without attaching, so Enter is the only way in.
+  const titleKb = document.createElement("span");
+  titleKb.className = "kb pane-kb";
+  titleKb.textContent = "↵";
+  titleKb.title = "Attach (Enter)";
+  title.append(titleText, titleKb);
   pane.appendChild(title);
   wirePaneDrag(pane, title, id); // grid tiles reorder by dragging the title bar
 
@@ -244,10 +253,17 @@ function renderSidebar() {
     const li = document.createElement("li");
     li.className = "session" + (s.id === focusedId ? " focused" : "");
     li.dataset.id = s.id;
+    li.title = "Double-click or r to rename";
+    // Enter attaches to the *focused* session, so the badge tracks focus and
+    // never hover — on a hovered row it would name the wrong target. Suppressed
+    // mid-rename, where Enter commits the name instead of attaching.
+    const attachKb = s.id === focusedId && s.id !== renamingId
+      ? `<span class="kb row-kb" title="Attach (Enter)">↵</span>` : "";
     li.innerHTML = `
       <div class="row1">
         <span class="dot ${s.status}"></span>
         <span class="label">${escapeHtml(s.label)}</span>
+        ${attachKb}
       </div>
       <div class="meta">${meta}${s.inPlace ? ' <span class="tag">in-place</span>' : ""} ${s.live ? "" : "· (stopped)"}</div>`;
     if (s.id === renamingId) {
@@ -275,7 +291,7 @@ function renderSidebar() {
   // Reflect live set into grid panes: focus ring + label (nicknames change).
   for (const [id, entry] of terms) {
     entry.pane.classList.toggle("focused", id === focusedId);
-    entry.pane.querySelector(".pane-title").textContent = paneTitleFor(id);
+    entry.pane.querySelector(".pane-title-text").textContent = paneTitleFor(id);
   }
 }
 
@@ -809,13 +825,55 @@ function cycleView() {
   setView(VIEWS[(VIEWS.indexOf(view) + 1) % VIEWS.length]);
 }
 
+// ---- fullscreen ----
+// Wails owns the window, so F11 has to round-trip to Go. Terminals re-fit off
+// the window resize event that follows.
+async function toggleFullscreen() {
+  try { await App?.ToggleFullscreen(); } catch (_) {}
+}
+
+// ---- shortcuts sheet ----
+// The reference card the sidebar footer used to be. Navigation mode only: "?"
+// is a character you type into agent prompts constantly, so it can't be stolen
+// while attached. Detach stays discoverable there anyway — #mode-hint reads
+// "Ctrl+Q to detach" for as long as you're attached.
+const keysBackdrop = $("#keys-backdrop");
+const keysOpen = () => !keysBackdrop.classList.contains("hidden");
+function openKeys() { keysBackdrop.classList.remove("hidden"); }
+function closeKeys() { keysBackdrop.classList.add("hidden"); }
+
 // ---- global keyboard ----
 // Two modes mirror the TUI: navigation (shortcuts) and attached (keystrokes go
 // to the agent, Ctrl+Q detaches). Capture phase so we beat xterm to the detach
 // chord. While attached, every other key falls through to the terminal.
 document.addEventListener("keydown", (ev) => {
+  // Window and terminal chords come first, ahead of every mode and modal
+  // guard: the shortcuts sheet files them under "Anywhere", and each guard
+  // below returns early, so anything placed after them would be a lie while a
+  // modal — the sheet itself included — is open. stopPropagation keeps xterm
+  // from also seeing the chord.
+  if (ev.key === "F11") {
+    ev.preventDefault(); ev.stopPropagation();
+    toggleFullscreen();
+    return;
+  }
+  if (ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+    const zoom = { "+": 1, "=": 1, "-": -1, "_": -1, "0": 0 }[ev.key];
+    if (zoom !== undefined) {
+      ev.preventDefault(); ev.stopPropagation();
+      setFontSize(zoom === 0 ? FONT_DEFAULT : termFontSize + zoom);
+      return;
+    }
+  }
   // An active rename input owns the keyboard (it handles Enter/Esc itself).
   if (renamingId !== null) return;
+  // Close is the sheet's only action, so anything that reads as "done" closes it.
+  if (keysOpen()) {
+    if (ev.key === "Escape" || ev.key === "Enter" || ev.key === "?") {
+      ev.preventDefault(); closeKeys();
+    }
+    return;
+  }
   if (!discardBackdrop.classList.contains("hidden")) {
     if (ev.key === "Escape") closeDiscardModal();
     if (ev.key === "Enter") { ev.preventDefault(); confirmDiscard(); }
@@ -826,16 +884,6 @@ document.addEventListener("keydown", (ev) => {
     if (ev.key === "Escape") closeModal();
     if (ev.key === "Enter" && ev.target.id !== "m-prompt") { ev.preventDefault(); spawn(); }
     return;
-  }
-  // Terminal zoom works in both modes, so it comes before the attached
-  // short-circuit. stopPropagation keeps xterm from also seeing the chord.
-  if (ev.ctrlKey && !ev.altKey && !ev.metaKey) {
-    const zoom = { "+": 1, "=": 1, "-": -1, "_": -1, "0": 0 }[ev.key];
-    if (zoom !== undefined) {
-      ev.preventDefault(); ev.stopPropagation();
-      setFontSize(zoom === 0 ? FONT_DEFAULT : termFontSize + zoom);
-      return;
-    }
   }
   if (attached) {
     if (ev.ctrlKey && (ev.key === "q" || ev.key === "Q")) {
@@ -856,6 +904,7 @@ document.addEventListener("keydown", (ev) => {
     case "1": ev.preventDefault(); setView("terminal"); break;
     case "2": ev.preventDefault(); setView("diff"); break;
     case "3": ev.preventDefault(); setView("shell"); break;
+    case "?": ev.preventDefault(); openKeys(); break;
   }
 }, true);
 
@@ -876,6 +925,9 @@ $("#d-branch").addEventListener("change", (e) => { if (e.target.checked) $("#d-w
 $("#d-worktree").addEventListener("change", (e) => { if (!e.target.checked) $("#d-branch").checked = false; });
 document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => setView(t.dataset.view)));
 $("#grid-toggle").addEventListener("click", toggleGrid);
+$("#shortcuts-btn").addEventListener("click", openKeys);
+$("#k-close").addEventListener("click", closeKeys);
+keysBackdrop.addEventListener("mousedown", (e) => { if (e.target === keysBackdrop) closeKeys(); });
 backdrop.addEventListener("mousedown", (e) => { if (e.target === backdrop) closeModal(); });
 discardBackdrop.addEventListener("mousedown", (e) => { if (e.target === discardBackdrop) closeDiscardModal(); });
 window.addEventListener("resize", fitVisible);
