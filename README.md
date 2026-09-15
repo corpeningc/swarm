@@ -1,12 +1,6 @@
 # Swarm
 
-**Run multiple AI coding agents in parallel.** Each in its own git worktree. No
-tmux. First-class Windows. Per-repo memory that compounds across sessions.
-
-Swarm is the actively-maintained successor to
-[claude-squad](https://github.com/smtg-ai/claude-squad): a native PTY/ConPTY
-substrate instead of tmux, Windows that actually works, file-level diff review,
-and `claude --resume` across restarts.
+**Run multiple AI coding agents in parallel.** Each in its own git worktree, and without tmux.
 
 ## Install
 
@@ -56,7 +50,7 @@ Make sure `$GOBIN` (default `~/go/bin`) is on your `PATH`.
 ## Quick start
 
 **Desktop app.** Launch it, click **New session**, pick your repo with
-**Browse...**. The **Workspace** picker chooses where the agent runs - a fresh
+**Browse...**. The **Workspace** picker chooses where the agent runs. A fresh
 worktree, the repo itself, or an existing worktree - and when that workspace has
 agent history you can continue an earlier conversation instead of starting cold.
 **Grid** tiles every live agent at once; `Ctrl` `+`/`-` scales the terminal text.
