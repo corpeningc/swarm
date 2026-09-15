@@ -173,6 +173,18 @@ func (a *App) OpenReleasePage(url string) error {
 	return nil
 }
 
+// ToggleFullscreen flips the window between fullscreen and normal, and returns
+// the state it landed in. The frontend binds it to F11; the webview can't do
+// this itself, since a Wails window has no browser chrome to ask.
+func (a *App) ToggleFullscreen() bool {
+	if wruntime.WindowIsFullscreen(a.ctx) {
+		wruntime.WindowUnfullscreen(a.ctx)
+		return false
+	}
+	wruntime.WindowFullscreen(a.ctx)
+	return true
+}
+
 // AgentNames returns the selectable agents, default first.
 func (a *App) AgentNames() []string { return a.orch.AgentNames() }
 
