@@ -749,23 +749,26 @@ async function spawn() {
   setModalBusy(true);
   btn.textContent = "Spawning…";
   $("#modal-err").textContent = "";
+  let dto;
   try {
-    const dto = await App.SpawnSession(
+    dto = await App.SpawnSession(
       repo, $("#m-prompt").value, $("#m-name").value.trim(), $("#m-agent").value,
       $("#m-workspace").value, $("#m-convo").value, $("#m-mcp").checked
     );
-    closeModal();
-    focusedId = dto.id;
-    ensureTerm(dto.id);
-    await refreshSessions();
-    focusSession(dto.id);
-    attach(); // land the user inside the fresh agent
   } catch (e) {
     $("#modal-err").textContent = String(e);
+    return;
   } finally {
+    // Unfreeze before closing: closeModal() refuses to close a busy form.
     setModalBusy(false);
     btn.textContent = "Spawn";
   }
+  closeModal();
+  focusedId = dto.id;
+  ensureTerm(dto.id);
+  await refreshSessions();
+  focusSession(dto.id);
+  attach(); // land the user inside the fresh agent
 }
 
 // ---- events from Go ----

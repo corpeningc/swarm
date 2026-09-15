@@ -15,7 +15,12 @@ Each session is one process:
    in the repository's own working tree instead.
 2. **PTY.** `aymanbagabas/go-pty` opens a pseudo-terminal - `pty(7)` on Unix,
    ConPTY on Windows - with the agent process attached. There's no tmux in the
-   loop; bytes flow directly through Go.
+   loop; bytes flow directly through Go. Reads end wherever the kernel's
+   buffer does (1024 bytes on macOS), so adapters re-join a multi-byte
+   character torn across two reads before emitting it
+   (`ptyutil.RuneJoiner`): a torn glyph JSON-encoded for the webview becomes
+   two or three U+FFFD cells, and one over-long rule is enough to throw every
+   later incremental frame off.
 3. **VT.** Bytes from the agent feed `micro-editor/terminal`, a vt100/xterm
    emulator. The TUI walks its cell grid and emits ANSI per cell into the
    focused pane; the desktop app streams the raw bytes to xterm.js instead.

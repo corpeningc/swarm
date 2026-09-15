@@ -215,17 +215,26 @@ func (a *Adapter) readLoop(cmd *pty.Cmd, pt pty.Pty, dump *os.File) {
 	}
 
 	buf := make([]byte, readChunkSize)
+	// Reads come back on whatever byte the kernel's buffer ends at (1024 on
+	// macOS), so a multi-byte glyph regularly straddles two of them. Each
+	// event carries whole characters only; the torn tail rides on the next.
+	var join ptyutil.RuneJoiner
 	for {
 		n, err := pt.Read(buf)
 		if n > 0 {
 			if dump != nil {
 				_, _ = dump.Write(buf[:n])
 			}
-			a.events <- agent.Event{Kind: agent.EventOutput, Text: string(buf[:n])}
+			if out := join.Feed(buf[:n]); len(out) > 0 {
+				a.events <- agent.Event{Kind: agent.EventOutput, Text: string(out)}
+			}
 		}
 		if err != nil {
 			break
 		}
+	}
+	if rest := join.Flush(); len(rest) > 0 {
+		a.events <- agent.Event{Kind: agent.EventOutput, Text: string(rest)}
 	}
 
 	exitCode := -1
